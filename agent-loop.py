@@ -10,6 +10,7 @@ from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
 import config
 from tools import run_tool, TOOLS
+from todo import todo_manager
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +72,11 @@ def run_one_loop(state: LoopState) -> bool:
         return False
     
     results: List[Dict[str, str]] = []
+    used_todo: bool = False
     for tool_call in assistant_message.tool_calls:
         tool_name = getattr(getattr(tool_call, "function", None), "name", "unknown")
+        if tool_name == "todo":
+            used_todo = True
         logger.debug("Executing tool call: %s", tool_name)
         output: str = run_tool(tool_call)
         results.append({
@@ -86,6 +90,18 @@ def run_one_loop(state: LoopState) -> bool:
         "name": tool_name,
         "content": json.dumps(results),
     })
+
+    # Todo reminder should in the back of tool message
+    if not used_todo:
+        # If the tool call didn't include an update to the todo list, increment the reminder counter
+        todo_manager.note_round_without_update()
+        remainder: Optional[str] = todo_manager.reminder()
+        if remainder:
+            state.messages.append({
+                "role": "user",
+                "content": remainder,
+            })
+
     state.turn_count += 1
     state.transition_reason = "tool_call"
     logger.debug("Turn %d finished with transition_reason=%s", state.turn_count, state.transition_reason)
@@ -103,14 +119,23 @@ if __name__ == "__main__":
     )
 
     logger.debug("Debug logging enabled")
-    initial_state: LoopState = LoopState(
+    state: LoopState = LoopState(
         messages=[],
         turn_count=0,
         transition_reason=None,
     )
-    initial_state.messages.append({
-        "role": "user",
-        "content": "现在几点了？\n",
-    })
-    agent_loop(initial_state)
-    print(initial_state.messages[-1]["content"])
+    while True:
+        try:
+            query: str = input(">> ")
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if query.strip().lower() == "exit":
+            break
+
+        state.messages.append({
+            "role": "user",
+            "content": query,
+        })
+        agent_loop(state)
+        print(state.messages[-1]["content"])

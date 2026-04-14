@@ -5,6 +5,9 @@ from subprocess import CompletedProcess, CalledProcessError, TimeoutExpired
 import json
 import os
 import logging
+import shlex
+
+from todo import todo_manager
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +19,7 @@ TOOL_HANDLERS: Dict[str, Callable] = {
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"],
                                         kw["new_text"]),
+    "todo":       lambda **kw: todo_manager.update(kw["todos"]),
 }
 
 TOOLS = [
@@ -83,6 +87,42 @@ TOOLS = [
                 #
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo",
+            "description": (
+                "Manage a todo list. Provide a list of todo items with their content and status (pending, in_progress, completed). "
+                "The agent can use this to keep track of its plan and progress. The tool will return a rendered string representation of the todo list that the agent can include in its messages."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "The list of todo items to update. Each item should have content and status.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "The content of the todo item."},
+                                "status": {
+                                    "type": "string",
+                                    "description": "The status of the todo item. Should be one of 'pending', 'in_progress', or 'completed'.",
+                                },
+                                "activeForm": {
+                                    "type": "string",
+                                    "description": "Optional present-continuous label.",
+                                },
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }
+        }
+
     }
 ]
 
@@ -108,7 +148,8 @@ def run_bash(command: str) -> str:
     """
     logger.debug(f"Running bash command: {command}")
     dangerous_commands: List[str] = ["rm -rf/", "dd", "mkfs", "shutdown", "reboot"]
-    if any(dc in command for dc in dangerous_commands):
+    tokens = shlex.split(command)
+    if any(dc in tokens for dc in dangerous_commands):
         return "Error: Rejected command, it is too dangerous to run."
     if "cat" in command:
         return "Error: 'cat' command is not allowed. Use the read_file tool instead to read file contents."
