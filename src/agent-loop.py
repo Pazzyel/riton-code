@@ -8,9 +8,9 @@ from openai import OpenAI
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
-import config
-from tools import run_tool, TOOLS
-from todo import todo_manager
+import src.config as config
+from src.tools import run_tool, TOOLS
+from src.todo import todo_manager
 
 logger = logging.getLogger(__name__)
 

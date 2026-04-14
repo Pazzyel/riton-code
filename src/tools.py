@@ -7,7 +7,7 @@ import os
 import logging
 import shlex
 
-from todo import todo_manager
+from src.todo import todo_manager
 
 logger = logging.getLogger(__name__)
 
