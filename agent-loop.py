@@ -1,13 +1,17 @@
-from typing import List, Dict, Optional
-import config
+from typing import List, Dict, Optional, Any
 import os
-import subprocess
 import json
-from subprocess import CompletedProcess, CalledProcessError
+import argparse
+import logging
 
 from openai import OpenAI
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
+
+import config
+from tools import run_tool, TOOLS
+
+logger = logging.getLogger(__name__)
 
 client: OpenAI = OpenAI(
     base_url=config.BASE_URL,
@@ -20,7 +24,7 @@ SYSTEM = (
 )
 
 class LoopState:
-    messages:           List[Dict[str, str]]    # The list of messages in the conversation history
+    messages:           List[Dict[str, Any]]    # The list of messages in the conversation history
     turn_count:         int                     # The number of turns taken in the loop
     transition_reason:  Optional[str]           # The reason for transitioning to the next turn, if applicable
 
@@ -36,8 +40,10 @@ def agent_loop(state: LoopState) -> None:
     The loop will continue until the agent decides to stop by returning False from run_one_loop.
     """
 
+    logger.debug("Starting agent loop")
     while run_one_loop(state):
         pass
+    logger.debug("Agent loop finished after %d turns", state.turn_count)
 
 def run_one_loop(state: LoopState) -> bool:
     """
@@ -45,6 +51,7 @@ def run_one_loop(state: LoopState) -> bool:
 
     Returns True if the loop should continue, or False if it should stop.
     """
+    logger.debug("Running loop turn %d", state.turn_count + 1)
     response: ChatCompletion = client.chat.completions.create(
         model=config.MODEL_ID,
         messages=[{"role": "system", "content": SYSTEM}] + state.messages, # type: ignore
@@ -55,14 +62,18 @@ def run_one_loop(state: LoopState) -> bool:
     state.messages.append({
         "role": "assistant",
         "content": assistant_message.content if assistant_message.content else "",
+        
     })
-    
+
     if (not assistant_message.tool_calls or len(assistant_message.tool_calls) == 0):
+        logger.debug("No tool calls requested by model, stopping loop")
         state.transition_reason = None
         return False
     
     results: List[Dict[str, str]] = []
     for tool_call in assistant_message.tool_calls:
+        tool_name = getattr(getattr(tool_call, "function", None), "name", "unknown")
+        logger.debug("Executing tool call: %s", tool_name)
         output: str = run_tool(tool_call)
         results.append({
             "type": tool_call.type,
@@ -72,64 +83,26 @@ def run_one_loop(state: LoopState) -> bool:
 
     state.messages.append({
         "role": "tool",
-        "content": str(results),
+        "name": tool_name,
+        "content": json.dumps(results),
     })
     state.turn_count += 1
     state.transition_reason = "tool_call"
+    logger.debug("Turn %d finished with transition_reason=%s", state.turn_count, state.transition_reason)
     return True
 
-def run_tool(tool_call) -> str:
-    # TODO: Add support for more tools'
-    arguments: Dict[str, str] = json.loads(tool_call.function.arguments)
-    if tool_call.function.name == "bash":
-        return run_bash(arguments["command"])
-    return "Error: Unknown tool call."
-
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "bash",
-        "description": "Run a shell command in the current workspace.",
-        "parameters": {
-            "type": "object",
-            "properties": {"command": {"type": "string", "description": "The shell command to run."}},
-            "required": ["command"],
-        },
-    },
-}]
-
-def run_bash(command: str) -> str:
-    """
-    Run a bash command and return its output.
-
-    The function is for the bash tool
-    """
-    dangerous_commands: List[str] = ["rm -rf/", "dd", "mkfs", "shutdown", "reboot"]
-    if any(dc in command for dc in dangerous_commands):
-        return "Error: Rejected command, it is too dangerous to run."
-    try:
-        result: CompletedProcess = subprocess.run(
-            command, 
-            shell=True, 
-            cwd=os.getcwd(), 
-            check=True, 
-            text=True,
-            timeout=30,
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE
-        )
-    except CalledProcessError as e:
-        return f"Error: Command failed with exit code {e.returncode}: {e.stderr.decode()}"
-    except TimeoutError as e:
-        return f"Error: Command timed out: {str(e)}"
-    except (FileNotFoundError, OSError) as e:
-        return f"Error: {e}"
-    
-    output: str = (result.stdout + result.stderr).strip()
-    # Limit output to 50,000 characters to prevent overwhelming the agent
-    return output[:50000] if output else "Command executed successfully with no output."
-
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the coding agent loop.")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging output")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        force=True,
+    )
+
+    logger.debug("Debug logging enabled")
     initial_state: LoopState = LoopState(
         messages=[],
         turn_count=0,
@@ -137,8 +110,7 @@ if __name__ == "__main__":
     )
     initial_state.messages.append({
         "role": "user",
-        "content": "What time is it now?\n",
+        "content": "现在几点了？\n",
     })
     agent_loop(initial_state)
     print(initial_state.messages[-1]["content"])
-    print(len(initial_state.messages))
