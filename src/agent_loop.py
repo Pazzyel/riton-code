@@ -8,16 +8,20 @@ from openai import OpenAI
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
-import src.config as config
-from src.tools import run_tool, TOOLS
-from src.todo import todo_manager
+import config as config
+from tools import run_tool, TOOLS, TOOL_HANDLERS, SUBAGENT_TOOLS
+from subagent import run_subagent
+from todo import todo_manager
+from ai_config import client
 
 logger = logging.getLogger(__name__)
 
-client: OpenAI = OpenAI(
-    base_url=config.BASE_URL,
-    api_key=config.API_KEY,
-)
+MAX_TURNS: int = 20  # Maximum number of turns in the agent loop before stopping
+
+
+PARENT_TOOL_HANDLERS = TOOL_HANDLERS.copy()
+PARENT_TOOL_HANDLERS["subagent"] = lambda **kw: run_subagent(kw["prompt"])
+PARENT_TOOLS = TOOLS + SUBAGENT_TOOLS
 
 SYSTEM = (
     f"You are a coding agent at {os.getcwd()}. "
@@ -42,7 +46,7 @@ def agent_loop(state: LoopState) -> None:
     """
 
     logger.debug("Starting agent loop")
-    while run_one_loop(state):
+    while run_one_loop(state) and state.turn_count < MAX_TURNS:
         pass
     logger.debug("Agent loop finished after %d turns", state.turn_count)
 
@@ -56,7 +60,7 @@ def run_one_loop(state: LoopState) -> bool:
     response: ChatCompletion = client.chat.completions.create(
         model=config.MODEL_ID,
         messages=[{"role": "system", "content": SYSTEM}] + state.messages, # type: ignore
-        tools=TOOLS, # type: ignore
+        tools=PARENT_TOOLS, # type: ignore
         max_tokens=1000,
     )
     assistant_message: ChatCompletionMessage = response.choices[0].message
@@ -78,7 +82,7 @@ def run_one_loop(state: LoopState) -> bool:
         if tool_name == "todo":
             used_todo = True
         logger.debug("Executing tool call: %s", tool_name)
-        output: str = run_tool(tool_call)
+        output: str = run_tool(tool_call, PARENT_TOOL_HANDLERS)
         results.append({
             "type": tool_call.type,
             "tool_call_id": tool_call.id,

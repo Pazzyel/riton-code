@@ -7,7 +7,7 @@ import os
 import logging
 import shlex
 
-from src.todo import todo_manager
+from todo import todo_manager
 
 logger = logging.getLogger(__name__)
 
@@ -122,15 +122,31 @@ TOOLS = [
                 "required": ["todos"]
             }
         }
+    },
+]
 
+SUBAGENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "subagent",
+            "description": "Run a subagent in a clean context and return a summary.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"}
+                },
+                "required": ["prompt"]
+            }
+        }
     }
 ]
 
-def run_tool(tool_call) -> str:
+def run_tool(tool_call, tool_handlers) -> str:
     # TODO: Add support for more tools'
     arguments: Dict[str, str] = json.loads(tool_call.function.arguments)
     logger.debug("Dispatching tool '%s' with args: %s", tool_call.function.name, arguments)
-    handler: Optional[Callable] = TOOL_HANDLERS.get(tool_call.function.name)
+    handler: Optional[Callable] = tool_handlers.get(tool_call.function.name)
     if handler:
         try:
             return handler(**arguments)
