@@ -8,10 +8,10 @@ import logging
 import shlex
 
 from todo import todo_manager
+from skills import load_skill
+from directory import WORKDIR
 
 logger = logging.getLogger(__name__)
-
-WORKDIR = Path.cwd()
 
 TOOL_HANDLERS: Dict[str, Callable] = {
     "bash":       lambda **kw: run_bash(kw["command"]),
@@ -20,6 +20,7 @@ TOOL_HANDLERS: Dict[str, Callable] = {
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"],
                                         kw["new_text"]),
     "todo":       lambda **kw: todo_manager.update(kw["todos"]),
+    "load_skill": lambda **kw: load_skill(kw["name"]),
 }
 
 TOOLS = [
@@ -123,6 +124,23 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": (
+                "Load a skill by name from the skills directory. This will read the corresponding SKILL.md file and return its content. "
+                "The agent can then include this content in its messages to use the information about the skill, such as its description and usage instructions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The name of the skill to load."},
+                },
+                "required": ["name"]
+            }
+        }
+    }
 ]
 
 SUBAGENT_TOOLS = [

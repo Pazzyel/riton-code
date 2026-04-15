@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Callable
 import json
 
 from openai.types.chat.chat_completion_message import ChatCompletionMessage

@@ -1,5 +1,4 @@
 from typing import List, Dict, Optional, Any
-import os
 import json
 import argparse
 import logging
@@ -13,6 +12,8 @@ from tools import run_tool, TOOLS, TOOL_HANDLERS, SUBAGENT_TOOLS
 from subagent import run_subagent
 from todo import todo_manager
 from ai_config import client
+from skills import SKILL_REGISTRY
+from directory import WORKDIR
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,13 @@ PARENT_TOOL_HANDLERS["subagent"] = lambda **kw: run_subagent(kw["prompt"])
 PARENT_TOOLS = TOOLS + SUBAGENT_TOOLS
 
 SYSTEM = (
-    f"You are a coding agent at {os.getcwd()}. "
+    f"You are a coding agent at {str(WORKDIR)}. "
     "Use bash to inspect and change the workspace. Act first, then report clearly."
+    f"""
+    <available_skills>
+    {SKILL_REGISTRY.describe_available()}
+    </available_skills>
+    """
 )
 
 class LoopState:
