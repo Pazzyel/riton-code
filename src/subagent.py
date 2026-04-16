@@ -1,12 +1,15 @@
 from typing import List, Dict, Any, Callable
 import json
+import logging
+import uuid
 
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 
 from tools import TOOLS, TOOL_HANDLERS, run_tool
 from ai_config import client
 import config
-import logging
+from compact import CompactState, try_compact, agent_compact_states
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,13 @@ def run_subagent(prompt: str,
         handlers=handlers,
         max_turns=max_turns,
     )
+    subagent_compact_state: CompactState = CompactState()
+    subagent_id: str = f"subagent_{uuid.uuid4().hex}"
+    agent_compact_states[subagent_id] = subagent_compact_state
     for _ in range(max_turns):
+        # Compact the subagent's conversation history first
+        subagent.messages = try_compact(subagent.messages, subagent_compact_state)
+        
         response = client.chat.completions.create(
             model=config.MODEL_ID,
             messages=subagent.messages, # type: ignore
@@ -53,9 +62,12 @@ def run_subagent(prompt: str,
         results: List[Dict[str, str]] = []
 
         for tool_call in assistant_message.tool_calls:
+            if not isinstance(tool_call, ChatCompletionMessageToolCall):
+                logger.warning("Received tool call that is not of type ChatCompletionMessageToolCall, now custom tool is not supported ,skipping: %s", tool_call)
+                continue
             tool_name = getattr(getattr(tool_call, "function", None), "name", "unknown")
             logger.debug("SubAgent Executing tool call: %s", tool_name)
-            output: str = run_tool(tool_call, subagent.handlers)
+            output: str = run_tool(tool_call, subagent.handlers, subagent_id)
             results.append({
                 "type": tool_call.type,
                 "tool_call_id": tool_call.id,
@@ -70,4 +82,5 @@ def run_subagent(prompt: str,
 
     # TODO Now the subagent summarizes is only using the contact of the assistant messages
     # May need use summary model to summarize the conversation
+    agent_compact_states.pop(subagent_id, None)  # Clean up compact state for this subagent
     return "".join([msg["content"] for msg in subagent.messages if msg["role"] == "assistant"]) or "No summary"

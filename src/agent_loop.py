@@ -6,6 +6,7 @@ import logging
 from openai import OpenAI
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 
 import config as config
 from tools import run_tool, TOOLS, TOOL_HANDLERS, SUBAGENT_TOOLS
@@ -14,11 +15,13 @@ from todo import todo_manager
 from ai_config import client
 from skill import SKILL_REGISTRY
 from directory import WORKDIR
+from compact import CompactState, try_compact, agent_compact_states
 
 logger = logging.getLogger(__name__)
 
 MAX_TURNS: int = 20  # Maximum number of turns in the agent loop before stopping
 
+MAIN_AGENT_ID: str = "agent_main"
 
 PARENT_TOOL_HANDLERS = TOOL_HANDLERS.copy()
 PARENT_TOOL_HANDLERS["subagent"] = lambda **kw: run_subagent(kw["prompt"])
@@ -44,7 +47,7 @@ class LoopState:
         self.turn_count = turn_count
         self.transition_reason = transition_reason
 
-def agent_loop(state: LoopState) -> None:
+def agent_loop(state: LoopState, compact_state: CompactState) -> None:
     """
     Run the agent loop until completion.
 
@@ -52,8 +55,10 @@ def agent_loop(state: LoopState) -> None:
     """
 
     logger.debug("Starting agent loop")
+    state.messages = try_compact(state.messages, compact_state)
     while run_one_loop(state) and state.turn_count < MAX_TURNS:
-        pass
+        state.messages = try_compact(state.messages, compact_state)
+    
     logger.debug("Agent loop finished after %d turns", state.turn_count)
 
 def run_one_loop(state: LoopState) -> bool:
@@ -84,11 +89,14 @@ def run_one_loop(state: LoopState) -> bool:
     results: List[Dict[str, str]] = []
     used_todo: bool = False
     for tool_call in assistant_message.tool_calls:
+        if not isinstance(tool_call, ChatCompletionMessageToolCall):
+            logger.warning("Received tool call that is not of type ChatCompletionMessageToolCall, now custom tool is not supported ,skipping: %s", tool_call)
+            continue
         tool_name = getattr(getattr(tool_call, "function", None), "name", "unknown")
         if tool_name == "todo":
             used_todo = True
         logger.debug("Executing tool call: %s", tool_name)
-        output: str = run_tool(tool_call, PARENT_TOOL_HANDLERS)
+        output: str = run_tool(tool_call, PARENT_TOOL_HANDLERS, agent_id=MAIN_AGENT_ID)
         results.append({
             "type": tool_call.type,
             "tool_call_id": tool_call.id,
@@ -134,6 +142,8 @@ if __name__ == "__main__":
         turn_count=0,
         transition_reason=None,
     )
+    compact_state: CompactState = CompactState()
+    agent_compact_states[MAIN_AGENT_ID] = compact_state
     while True:
         try:
             query: str = input(">> ")
@@ -147,5 +157,5 @@ if __name__ == "__main__":
             "role": "user",
             "content": query,
         })
-        agent_loop(state)
+        agent_loop(state, compact_state)
         print(state.messages[-1]["content"])

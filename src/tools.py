@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Dict, Callable, List
+from typing import Optional, Dict, Callable, List, Any
 import subprocess
 from subprocess import CompletedProcess, CalledProcessError, TimeoutExpired
 import json
@@ -7,18 +7,20 @@ import os
 import logging
 import shlex
 
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
+
 from todo import todo_manager
 from skill import load_skill, get_skill_dir
 from directory import WORKDIR
+from compact import track_recent_files, agent_compact_states
 
 logger = logging.getLogger(__name__)
 
 TOOL_HANDLERS: Dict[str, Callable] = {
     "bash":       lambda **kw: run_bash(kw["command"]),
-    "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
-    "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
-    "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"],
-                                        kw["new_text"]),
+    "read_file":  lambda **kw: run_read(path=kw["path"], limit=kw.get("limit"), agent_id=kw["agent_id"]),
+    "write_file": lambda **kw: run_write(path=kw["path"], content=kw["content"], agent_id=kw["agent_id"]),
+    "edit_file":  lambda **kw: run_edit(path=kw["path"], old_text=kw["old_text"], new_text=kw["new_text"], agent_id=kw["agent_id"]),
     "todo":       lambda **kw: todo_manager.update(kw["todos"]),
     "load_skill": lambda **kw: load_skill(kw["name"]),
     "get_skill_dir": lambda **kw: get_skill_dir(kw["name"])
@@ -175,14 +177,17 @@ SUBAGENT_TOOLS = [
     }
 ]
 
-def run_tool(tool_call, tool_handlers) -> str:
+def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict[str, Callable], agent_id: str) -> str:
+    """Run a tool call using the provided handlers and return the output."""
     # TODO: Add support for more tools'
     arguments: Dict[str, str] = json.loads(tool_call.function.arguments)
     logger.debug("Dispatching tool '%s' with args: %s", tool_call.function.name, arguments)
     handler: Optional[Callable] = tool_handlers.get(tool_call.function.name)
+    # For subagent tool calls, we want to track recent files accessed by the subagent for better compaction in the main agent
+    all_args: Dict[str, Any] = {**arguments, "agent_id": agent_id}
     if handler:
         try:
-            return handler(**arguments)
+            return handler(**all_args)
         except Exception as e:
             logger.error(f"Error while running tool {tool_call.function.name}: {str(e)}")
             return f"Error: Exception while running tool: {str(e)}"
@@ -228,32 +233,36 @@ def run_bash(command: str) -> str:
     return output[:50000] if output else "Command executed successfully with no output."
 
 
-def safe_path(p: str) -> Path:
+def safe_path(p: str, agent_id: str) -> Path:
     """Resolve a path and ensure it is within the workspace."""
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
         raise ValueError(f"Path escapes workspace: {p}")
+    # Using file operation tool will trigger the tracking of recent files for compaction purposes
+    if agent_id not in agent_compact_states:
+        raise ValueError(f"Agent ID {agent_id} not found in compact states.")
+    track_recent_files(agent_compact_states[agent_id], p)
     return path
 
-def run_read(path: str, limit: Optional[int] = None) -> str:
+def run_read(path: str, limit: Optional[int] = None, agent_id: str = "") -> str:
     """Read a file safely, ensuring it is within the workspace and optionally limiting the number of lines."""
     logger.debug(f"Reading file at path: {path} with limit: {limit}")
-    text = safe_path(path).read_text()
+    text = safe_path(path, agent_id).read_text()
     lines = text.splitlines()
     if limit and limit < len(lines):
         lines = lines[:limit]
     return "\n".join(lines)[:50000]
 
-def run_write(path: str, content: str) -> str:
+def run_write(path: str, content: str, agent_id: str = "") -> str:
     """Write to a file safely, ensuring it is within the workspace."""
     logger.debug(f"Writing to file at path: {path}")
-    safe_path(path).write_text(content)
+    safe_path(path, agent_id).write_text(content)
     return "File written successfully."
 
-def run_edit(path: str, old_text: str, new_text: str) -> str:
+def run_edit(path: str, old_text: str, new_text: str, agent_id: str = "") -> str:
     """Edit a file safely, ensuring it is within the workspace."""
     logger.debug(f"Editing file at path: {path}")
-    file_path = safe_path(path)
+    file_path = safe_path(path, agent_id)
     text = file_path.read_text()
     if old_text not in text:
         return "Error: Old text not found in file."
