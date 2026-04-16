@@ -12,7 +12,7 @@ from tools import run_tool, TOOLS, TOOL_HANDLERS, SUBAGENT_TOOLS
 from subagent import run_subagent
 from todo import todo_manager
 from ai_config import client
-from skills import SKILL_REGISTRY
+from skill import SKILL_REGISTRY
 from directory import WORKDIR
 
 logger = logging.getLogger(__name__)

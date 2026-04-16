@@ -1,6 +1,6 @@
 
 from typing import Dict, Any, Optional, Tuple
-from typing_extensions import TypedDict
+from pydantic import BaseModel
 from pathlib import Path
 import re
 from re import Match
@@ -11,11 +11,11 @@ from directory import SKILL_DIR
 
 logger = logging.getLogger(__name__)
 
-class SkillManifest(TypedDict):
+class SkillManifest(BaseModel):
     name: str
     description: str
 
-class SkillDocument(TypedDict):
+class SkillDocument(BaseModel):
     manifest: SkillManifest
     body: str # Full markdown content of the SKILL.md file
 
@@ -68,11 +68,11 @@ class SkillRegistry:
 
     def register(self, skill: SkillDocument) -> None:
         """Register a skill in the registry."""
-        self.skills[skill["manifest"]["name"]] = skill
+        self.skills[skill.manifest.name] = skill
 
     def describe_available(self) -> str:
         """Return a string describing the available skills in the registry."""
-        return "\n".join(f"- {name}: {skill['manifest']['description']}" for name, skill in self.skills.items())
+        return "\n".join(f"- {name}: {skill.manifest.description}" for name, skill in self.skills.items())
 
     def get_content(self, name: str) -> str:
         """Get the full markdown content of a skill by name."""
@@ -80,7 +80,7 @@ class SkillRegistry:
         skill = self.skills.get(name)
         return f"""
         <skill name="{name}">
-        {skill['body'] if skill else 'Skill content not provided.'}
+        {skill.body if skill else 'Skill content not provided.'}
         </skill>
         """
     

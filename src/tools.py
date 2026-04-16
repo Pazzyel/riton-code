@@ -8,7 +8,7 @@ import logging
 import shlex
 
 from todo import todo_manager
-from skills import load_skill, get_skill_dir
+from skill import load_skill, get_skill_dir
 from directory import WORKDIR
 
 logger = logging.getLogger(__name__)
