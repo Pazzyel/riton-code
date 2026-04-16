@@ -83,9 +83,22 @@ class SkillRegistry:
         {skill['body'] if skill else 'Skill content not provided.'}
         </skill>
         """
+    
+    def get_skill_dir(self, name: str) -> str:
+        """Get the directory path of a specific skill by name."""
+        skill = self.skills.get(name)
+        if not skill:
+            raise ValueError(f"Skill '{name}' not found in registry.")
+        # Assuming the skill's body contains a reference to its file path, we can extract it. 
+        # For simplicity, let's assume the skill's body starts with a line like "Path: <relative_path_to_skill_file>"
+        return (SKILL_DIR / name).as_posix()
 
 SKILL_REGISTRY = SkillRegistry()
 
 def load_skill(name: str) -> str:
     """Load a skill by name from the registry."""
     return SKILL_REGISTRY.get_content(name)
+
+def get_skill_dir(name: str) -> str:
+    """Get the directory path of a specific skill by name."""
+    return SKILL_REGISTRY.get_skill_dir(name)

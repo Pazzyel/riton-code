@@ -8,7 +8,7 @@ import logging
 import shlex
 
 from todo import todo_manager
-from skills import load_skill
+from skills import load_skill, get_skill_dir
 from directory import WORKDIR
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,7 @@ TOOL_HANDLERS: Dict[str, Callable] = {
                                         kw["new_text"]),
     "todo":       lambda **kw: todo_manager.update(kw["todos"]),
     "load_skill": lambda **kw: load_skill(kw["name"]),
+    "get_skill_dir": lambda **kw: get_skill_dir(kw["name"])
 }
 
 TOOLS = [
@@ -136,6 +137,20 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "The name of the skill to load."},
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_skill_dir",
+            "description": "Get the posix path to a specific skill's directory. This can be used to inspect all files in the skill",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The name of the skill for which to get the directory path."},
                 },
                 "required": ["name"]
             }
