@@ -48,17 +48,17 @@
 ## ⚙️ 配置要求
 
 ### 环境变量
-需要设置API密钥环境变量：
+需要设置API密钥环境变量（环境变量的名称应该和你的配置文件中指定的名称一致）：
 ```bash
-export DASHSCOPE_API_KEY="your-api-key-here"
+export OPENAI_API_KEY="your-api-key-here"
 ```
 
 ### 配置文件 (config.yaml)
 ```yaml
 model:
-  name: qwen3-max
-  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key_path_var: DASHSCOPE_API_KEY
+  name: gpt-5.4
+  base_url: https://api.openai.com/v1
+  api_key_path_var: OPENAI_API_KEY
 ```
 
 ## 🎯 使用示例
