@@ -52,7 +52,7 @@ def run_subagent(prompt: str,
             model=config.MODEL_ID,
             messages=subagent.messages, # type: ignore
             tools=subagent.tools, # type: ignore
-            max_tokens=1000,
+            max_tokens=config.MAX_TOKENS,
         )
         assistant_message: ChatCompletionMessage = response.choices[0].message
         subagent.messages.append({"role": "assistant", "content": assistant_message.content})

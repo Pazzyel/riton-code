@@ -72,7 +72,7 @@ def run_one_loop(state: LoopState) -> bool:
         model=config.MODEL_ID,
         messages=[{"role": "system", "content": SYSTEM}] + state.messages, # type: ignore
         tools=PARENT_TOOLS, # type: ignore
-        max_tokens=1000,
+        max_tokens=config.MAX_TOKENS,
     )
     assistant_message: ChatCompletionMessage = response.choices[0].message
     state.messages.append({
