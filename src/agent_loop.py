@@ -2,8 +2,8 @@ from typing import List, Dict, Optional, Any
 import json
 import argparse
 import logging
+import asyncio
 
-from openai import OpenAI
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
@@ -47,7 +47,7 @@ class LoopState:
         self.turn_count = turn_count
         self.transition_reason = transition_reason
 
-def agent_loop(state: LoopState, compact_state: CompactState) -> None:
+async def agent_loop(state: LoopState, compact_state: CompactState) -> None:
     """
     Run the agent loop until completion.
 
@@ -55,20 +55,20 @@ def agent_loop(state: LoopState, compact_state: CompactState) -> None:
     """
 
     logger.debug("Starting agent loop")
-    state.messages = try_compact(state.messages, compact_state)
-    while run_one_loop(state) and state.turn_count < MAX_TURNS:
-        state.messages = try_compact(state.messages, compact_state)
+    state.messages = await try_compact(state.messages, compact_state)
+    while await run_one_loop(state) and state.turn_count < MAX_TURNS:
+        state.messages = await try_compact(state.messages, compact_state)
     
     logger.debug("Agent loop finished after %d turns", state.turn_count)
 
-def run_one_loop(state: LoopState) -> bool:
+async def run_one_loop(state: LoopState) -> bool:
     """
     Run one loop of the agent's reasoning and acting process.
 
     Returns True if the loop should continue, or False if it should stop.
     """
     logger.debug("Running loop turn %d", state.turn_count + 1)
-    response: ChatCompletion = client.chat.completions.create(
+    response: ChatCompletion = await client.chat.completions.create(
         model=config.MODEL_ID,
         messages=[{"role": "system", "content": SYSTEM}] + state.messages, # type: ignore
         tools=PARENT_TOOLS, # type: ignore
@@ -96,7 +96,7 @@ def run_one_loop(state: LoopState) -> bool:
         if tool_name == "todo":
             used_todo = True
         logger.debug("Executing tool call: %s", tool_name)
-        output: str = run_tool(tool_call, PARENT_TOOL_HANDLERS, agent_id=MAIN_AGENT_ID)
+        output: str = await run_tool(tool_call, PARENT_TOOL_HANDLERS, agent_id=MAIN_AGENT_ID)
         results.append({
             "type": tool_call.type,
             "tool_call_id": tool_call.id,
@@ -157,5 +157,5 @@ if __name__ == "__main__":
             "role": "user",
             "content": query,
         })
-        agent_loop(state, compact_state)
+        asyncio.run(agent_loop(state, compact_state))
         print(state.messages[-1]["content"])

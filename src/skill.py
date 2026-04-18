@@ -1,4 +1,3 @@
-
 from typing import Dict, Any, Optional, Tuple
 from pydantic import BaseModel
 from pathlib import Path
@@ -6,6 +5,9 @@ import re
 from re import Match
 import yaml
 import logging
+
+# The file didn's use asyncio or aiofiles before
+# Because it's io only happens in program initialization
 
 from directory import SKILL_DIR
 

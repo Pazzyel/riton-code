@@ -1,7 +1,7 @@
-from openai import OpenAI
+from openai import AsyncOpenAI
 import config
 
-client: OpenAI = OpenAI(
+client: AsyncOpenAI = AsyncOpenAI(
     base_url=config.BASE_URL,
     api_key=config.API_KEY,
 )

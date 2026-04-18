@@ -30,7 +30,7 @@ class SubagentContext:
         self.handlers = handlers
         self.max_turns = max_turns
 
-def run_subagent(prompt: str, 
+async def run_subagent(prompt: str, 
                  tools: List[Dict[str, Any]] = CHILDREN_TOOLS, 
                  handlers: Dict[str, Callable] = TOOL_HANDLERS, 
                  max_turns: int = SUBAGENT_DEFAULT_MAX_TURNS) -> str:
@@ -46,9 +46,9 @@ def run_subagent(prompt: str,
     agent_compact_states[subagent_id] = subagent_compact_state
     for _ in range(max_turns):
         # Compact the subagent's conversation history first
-        subagent.messages = try_compact(subagent.messages, subagent_compact_state)
+        subagent.messages = await try_compact(subagent.messages, subagent_compact_state)
         
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=config.MODEL_ID,
             messages=subagent.messages, # type: ignore
             tools=subagent.tools, # type: ignore
@@ -67,7 +67,7 @@ def run_subagent(prompt: str,
                 continue
             tool_name = getattr(getattr(tool_call, "function", None), "name", "unknown")
             logger.debug("SubAgent Executing tool call: %s", tool_name)
-            output: str = run_tool(tool_call, subagent.handlers, subagent_id)
+            output: str = await run_tool(tool_call, subagent.handlers, subagent_id)
             results.append({
                 "type": tool_call.type,
                 "tool_call_id": tool_call.id,

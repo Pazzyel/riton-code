@@ -1,11 +1,13 @@
 from pathlib import Path
 from typing import Optional, Dict, Callable, List, Any
-import subprocess
-from subprocess import CompletedProcess, CalledProcessError, TimeoutExpired
+import aiofiles
+import asyncio
+from asyncio.subprocess import Process
 import json
 import os
 import logging
 import shlex
+import inspect
 
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 
@@ -178,7 +180,7 @@ SUBAGENT_TOOLS = [
     }
 ]
 
-def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict[str, Callable], agent_id: str) -> str:
+async def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict[str, Callable], agent_id: str) -> str:
     """Run a tool call using the provided handlers and return the output."""
     # TODO: Add support for more tools'
     arguments: Dict[str, str] = json.loads(tool_call.function.arguments)
@@ -199,14 +201,22 @@ def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict[str, 
     all_args: Dict[str, Any] = {**arguments, "agent_id": agent_id}
     if handler:
         try:
-            return handler(**all_args)
+            # Handlers may be sync wrappers (e.g. lambdas) that return a coroutine.
+            # Always inspect the call result and await when needed.
+            result = handler(**all_args)
+            # You couldn'd use inspect.iscoroutine here
+            # Because handlers use lambda warppers, and the lambda is not async
+            # But it still returns a coroutine when it calls the async function inside
+            if inspect.isawaitable(result):
+                return await result
+            return result
         except Exception as e:
             logger.error(f"Error while running tool {tool_call.function.name}: {str(e)}")
             return f"Error: Exception while running tool: {str(e)}"
     return "Error: Unknown tool call."
 
 
-def run_bash(command: str) -> str:
+async def run_bash(command: str) -> str:
     """
     Run a bash command and return its output.
 
@@ -220,27 +230,23 @@ def run_bash(command: str) -> str:
     if "cat" in command:
         return "Error: 'cat' command is not allowed. Use the read_file tool instead to read file contents."
     try:
-        result: CompletedProcess = subprocess.run(
+        result: Process = await asyncio.create_subprocess_shell(
             command, 
             shell=True, 
             cwd=os.getcwd(), 
-            check=True, 
-            text=True,
-            timeout=30,
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE
+            stdout=asyncio.subprocess.PIPE, 
+            stderr=asyncio.subprocess.PIPE
         )
-    except CalledProcessError as e:
-        logger.error(f"Error while running bash command '{command}': {str(e)}")
-        return f"Error: Command failed with exit code {e.returncode}: {e.stderr}"
-    except TimeoutExpired as e:
+        stdout, stderr = await asyncio.wait_for(result.communicate(), timeout=30)  # Set a timeout for command execution
+    except asyncio.TimeoutError as e:
         logger.error(f"Error while running bash command '{command}': {str(e)}")
         return f"Error: Command timed out: {str(e)}"
     except (FileNotFoundError, OSError) as e:
         logger.error(f"Error while running bash command '{command}': {str(e)}")
         return f"Error: {e}"
     
-    output: str = (result.stdout + result.stderr).strip()
+    
+    output: str = (stdout.decode() + stderr.decode()).strip()
     # Limit output to 50,000 characters to prevent overwhelming the agent
     return output[:50000] if output else "Command executed successfully with no output."
 
@@ -256,28 +262,34 @@ def safe_path(p: str, agent_id: str) -> Path:
     track_recent_files(agent_compact_states[agent_id], p)
     return path
 
-def run_read(path: str, limit: Optional[int] = None, agent_id: str = "") -> str:
+async def run_read(path: str, limit: Optional[int] = None, agent_id: str = "") -> str:
     """Read a file safely, ensuring it is within the workspace and optionally limiting the number of lines."""
     logger.debug(f"Reading file at path: {path} with limit: {limit}")
-    text = safe_path(path, agent_id).read_text()
+    file_path: Path = safe_path(path, agent_id)
+    async with aiofiles.open(file_path, mode='r') as f:
+        text: str = await f.read()
     lines = text.splitlines()
     if limit and limit < len(lines):
         lines = lines[:limit]
     return "\n".join(lines)[:50000]
 
-def run_write(path: str, content: str, agent_id: str = "") -> str:
+async def run_write(path: str, content: str, agent_id: str = "") -> str:
     """Write to a file safely, ensuring it is within the workspace."""
     logger.debug(f"Writing to file at path: {path}")
-    safe_path(path, agent_id).write_text(content)
+    file_path: Path = safe_path(path, agent_id)
+    async with aiofiles.open(file_path, mode='w') as f:
+        await f.write(content)
     return "File written successfully."
 
-def run_edit(path: str, old_text: str, new_text: str, agent_id: str = "") -> str:
+async def run_edit(path: str, old_text: str, new_text: str, agent_id: str = "") -> str:
     """Edit a file safely, ensuring it is within the workspace."""
     logger.debug(f"Editing file at path: {path}")
-    file_path = safe_path(path, agent_id)
-    text = file_path.read_text()
+    file_path: Path = safe_path(path, agent_id)
+    async with aiofiles.open(file_path, mode='r') as f:
+        text: str = await f.read()
     if old_text not in text:
         return "Error: Old text not found in file."
     updated_text = text.replace(old_text, new_text)
-    file_path.write_text(updated_text)
+    async with aiofiles.open(file_path, mode='w') as f:
+        await f.write(updated_text)
     return "File edited successfully."

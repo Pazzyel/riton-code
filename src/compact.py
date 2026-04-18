@@ -4,6 +4,8 @@ from pathlib import Path
 import time
 import json
 import logging
+import asyncio
+import aiofiles
 
 from openai.types.chat.chat_completion import ChatCompletion
 import tiktoken
@@ -38,7 +40,7 @@ def track_recent_files(state: CompactState, file_path: str) -> None:
     if len(state.recent_files) > 5:
         state.recent_files.pop(0)
 
-def persist_large_tool_output(tool_call_id: str, output: str) -> str:
+async def persist_large_tool_output(tool_call_id: str, output: str) -> str:
     """Persist large tool output to disk and return the file path."""
     if len(output) <= PERSIST_THRESHOLD:
         return output  # No need to persist if output is below threshold
@@ -46,7 +48,8 @@ def persist_large_tool_output(tool_call_id: str, output: str) -> str:
     TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     file_path: Path = TOOL_RESULTS_DIR / f"{tool_call_id}.txt"
     if not file_path.exists():
-        file_path.write_text(output)
+        async with aiofiles.open(file_path, "w") as f:
+            await f.write(output)
 
     preview: str = output[:PREVIEW_CHARS] + "... [truncated]"
     realtive_path: Path = file_path.relative_to(WORKDIR)
@@ -87,7 +90,7 @@ def micro_compact(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         })
     return compacted_messages
 
-def summary_messages(messages: List[Dict[str, Any]]) -> str:
+async def summary_messages(messages: List[Dict[str, Any]]) -> str:
     """Summarize the conversation history and return a new list of messages with the summary."""
     summary_prompt: str = f"""
         Summarize this coding-agent conversation so work can continue.\n
@@ -100,7 +103,7 @@ def summary_messages(messages: List[Dict[str, Any]]) -> str:
         Be compact but concrete.\n\n
         {messages}
     """
-    response: ChatCompletion = client.chat.completions.create(
+    response: ChatCompletion = await client.chat.completions.create(
         model=config.MODEL_ID,
         messages=[{"role": "user", "content": summary_prompt}],
         max_tokens=MODEL_CONTEXT_LIMIT,
@@ -108,21 +111,21 @@ def summary_messages(messages: List[Dict[str, Any]]) -> str:
 
     return response.choices[0].message.content.strip() if response.choices and response.choices[0].message and response.choices[0].message.content else "Summary failed."
 
-def write_history_to_transcript(messages: List[Dict[str, Any]]) -> Path:
+async def write_history_to_transcript(messages: List[Dict[str, Any]]) -> Path:
     """Write the conversation history to disk for later reference."""
     TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     file_path: Path = TRANSCRIPT_DIR / f"history_{time.time()}.jsonl"
-    with file_path.open("w") as f:
+    async with aiofiles.open(file_path, "w") as f:
         for msg in messages:
-            f.write(f"{json.dumps(msg, default=str)}\n")
+            await f.write(f"{json.dumps(msg, default=str)}\n")
     return file_path
 
-def compact_history(messages: List[Dict[str, Any]], state: CompactState, focus: Optional[str] = None) -> List[Dict[str, Any]]:
+async def compact_history(messages: List[Dict[str, Any]], state: CompactState, focus: Optional[str] = None) -> List[Dict[str, Any]]:
     """Compact the conversation history if it exceeds the context limit."""
-    transcript_path: Path = write_history_to_transcript(messages)
+    transcript_path: Path = await write_history_to_transcript(messages)
     logger.info(f"[Conversation history written to: {transcript_path}]")
 
-    summary: str = summary_messages(messages)
+    summary: str = await summary_messages(messages)
     if focus:
         summary += f"\n\nFocus for next steps: {focus}"
     if state.recent_files and len(state.recent_files) > 0:
@@ -147,7 +150,7 @@ def estimate_message_tokens(messages: List[Dict[str, Any]]) -> int:
     encoder = tiktoken.get_encoding("cl100k_base")
     return sum(len(encoder.encode(msg.get("content", ""))) for msg in messages)
 
-def try_compact(messages: List[Dict[str, Any]], state: CompactState, focus: Optional[str] = None) -> List[Dict[str, Any]]:
+async def try_compact(messages: List[Dict[str, Any]], state: CompactState, focus: Optional[str] = None) -> List[Dict[str, Any]]:
     """Try to compact the messages if they exceed the context limit."""
     if len(messages) <= KEEP_RECENT_MESSAGES:
         return messages  # No need to compact if messages are within the limit
@@ -158,7 +161,7 @@ def try_compact(messages: List[Dict[str, Any]], state: CompactState, focus: Opti
         return messages  # No need to compact
     
     logger.info("Context length exceeds limit, performing compaction...")
-    compacted_messages = compact_history(messages, state, focus)
+    compacted_messages = await compact_history(messages, state, focus)
     
     return compacted_messages + messages[-KEEP_RECENT_MESSAGES:]
 
