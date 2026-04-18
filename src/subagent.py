@@ -1,5 +1,4 @@
 from typing import List, Dict, Any, Callable
-import json
 import logging
 import uuid
 
@@ -55,30 +54,53 @@ async def run_subagent(prompt: str,
             max_tokens=config.MAX_TOKENS,
         )
         assistant_message: ChatCompletionMessage = response.choices[0].message
-        subagent.messages.append({"role": "assistant", "content": assistant_message.content})
-        if (not assistant_message.tool_calls or len(assistant_message.tool_calls) == 0):
-            break
-    
-        results: List[Dict[str, str]] = []
+        valid_tool_calls: List[Dict[str, Any]] = []
+        if assistant_message.tool_calls:
+            for i, tool_call in enumerate(assistant_message.tool_calls):
+                if not isinstance(tool_call, ChatCompletionMessageToolCall):
+                    logger.warning("Received tool call that is not of type ChatCompletionMessageToolCall, now custom tool is not supported ,skipping: %s", tool_call)
+                    continue
+                tool_name = getattr(getattr(tool_call, "function", None), "name", "unknown")
+                tool_args = getattr(getattr(tool_call, "function", None), "arguments", "{}")
+                tool_call_id = tool_call.id if tool_call.id else f"call_{i + 1}"
+                valid_tool_calls.append({
+                    "tool_call": tool_call,
+                    "name": tool_name,
+                    "id": tool_call_id,
+                    "arguments": tool_args,
+                })
 
-        for tool_call in assistant_message.tool_calls:
-            if not isinstance(tool_call, ChatCompletionMessageToolCall):
-                logger.warning("Received tool call that is not of type ChatCompletionMessageToolCall, now custom tool is not supported ,skipping: %s", tool_call)
-                continue
-            tool_name = getattr(getattr(tool_call, "function", None), "name", "unknown")
+        assistant_payload: Dict[str, Any] = {
+            "role": "assistant",
+            "content": assistant_message.content if assistant_message.content else "",
+        }
+        if valid_tool_calls:
+            assistant_payload["tool_calls"] = [
+                {
+                    "id": call["id"],
+                    "type": "function",
+                    "function": {
+                        "name": call["name"],
+                        "arguments": call["arguments"],
+                    },
+                }
+                for call in valid_tool_calls
+            ]
+        subagent.messages.append(assistant_payload)
+
+        if len(valid_tool_calls) == 0:
+            break
+
+        for call in valid_tool_calls:
+            tool_call = call["tool_call"]
+            tool_name = call["name"]
             logger.debug("SubAgent Executing tool call: %s", tool_name)
             output: str = await run_tool(tool_call, subagent.handlers, subagent_id)
-            results.append({
-                "type": tool_call.type,
-                "tool_call_id": tool_call.id,
+            subagent.messages.append({
+                "role": "tool",
+                "tool_call_id": call["id"],
                 "content": output,
-            }) 
-
-        subagent.messages.append({
-            "role": "tool",
-            "name": tool_name,
-            "content": json.dumps(results),
-        })
+            })
 
     # TODO Now the subagent summarizes is only using the contact of the assistant messages
     # May need use summary model to summarize the conversation

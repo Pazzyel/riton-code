@@ -75,39 +75,61 @@ async def run_one_loop(state: LoopState) -> bool:
         max_tokens=config.MAX_TOKENS,
     )
     assistant_message: ChatCompletionMessage = response.choices[0].message
-    state.messages.append({
+    valid_tool_calls: List[Dict[str, Any]] = []
+    # if a assistant message includes tool calls
+    # It's content is empty
+    if assistant_message.tool_calls:
+        for i, tool_call in enumerate(assistant_message.tool_calls):
+            if not isinstance(tool_call, ChatCompletionMessageToolCall):
+                logger.warning("Received tool call that is not of type ChatCompletionMessageToolCall, now custom tool is not supported ,skipping: %s", tool_call)
+                continue
+            tool_name = getattr(getattr(tool_call, "function", None), "name", "unknown")
+            tool_args = getattr(getattr(tool_call, "function", None), "arguments", "{}")
+            tool_call_id = tool_call.id if tool_call.id else f"call_{state.turn_count + 1}_{i + 1}"
+            valid_tool_calls.append({
+                "tool_call": tool_call,
+                "name": tool_name,
+                "id": tool_call_id,
+                "arguments": tool_args,
+            })
+
+    assistant_payload: Dict[str, Any] = {
         "role": "assistant",
         "content": assistant_message.content if assistant_message.content else "",
-        
-    })
+    }
+    # But it's tool_calls is not empty, and must be saved in the message for later tool execution
+    if valid_tool_calls:
+        assistant_payload["tool_calls"] = [
+            {
+                "id": call["id"],
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": call["arguments"],
+                },
+            }
+            for call in valid_tool_calls
+        ]
+    state.messages.append(assistant_payload)
 
-    if (not assistant_message.tool_calls or len(assistant_message.tool_calls) == 0):
+    if len(valid_tool_calls) == 0:
         logger.debug("No tool calls requested by model, stopping loop")
         state.transition_reason = None
         return False
     
-    results: List[Dict[str, str]] = []
     used_todo: bool = False
-    for tool_call in assistant_message.tool_calls:
-        if not isinstance(tool_call, ChatCompletionMessageToolCall):
-            logger.warning("Received tool call that is not of type ChatCompletionMessageToolCall, now custom tool is not supported ,skipping: %s", tool_call)
-            continue
-        tool_name = getattr(getattr(tool_call, "function", None), "name", "unknown")
+    for call in valid_tool_calls:
+        tool_call = call["tool_call"]
+        tool_name = call["name"]
         if tool_name == "todo":
             used_todo = True
         logger.debug("Executing tool call: %s", tool_name)
         output: str = await run_tool(tool_call, PARENT_TOOL_HANDLERS, agent_id=MAIN_AGENT_ID)
-        results.append({
-            "type": tool_call.type,
-            "tool_call_id": tool_call.id,
+        state.messages.append({
+            "role": "tool",
+            "tool_call_id": call["id"],
             "content": output,
-        }) 
-
-    state.messages.append({
-        "role": "tool",
-        "name": tool_name,
-        "content": json.dumps(results),
-    })
+        })
 
     # Todo reminder should in the back of tool message
     if not used_todo:
