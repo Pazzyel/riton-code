@@ -13,6 +13,7 @@ from todo import todo_manager
 from skill import load_skill, get_skill_dir
 from directory import WORKDIR
 from compact import track_recent_files, agent_compact_states
+from permission.permission import permission_manager, PermissionResult
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,17 @@ def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict[str, 
     # TODO: Add support for more tools'
     arguments: Dict[str, str] = json.loads(tool_call.function.arguments)
     logger.debug("Dispatching tool '%s' with args: %s", tool_call.function.name, arguments)
+
+    # Check permissions before running the tool
+    permission_result: PermissionResult = permission_manager.check(tool_call.function.name, arguments)
+    if permission_result.behavior == "deny":
+        logger.info(f"Permission denied for tool call '{tool_call.function.name}' with args {arguments}: {permission_result.reason}")
+        return f"Permission denied: {permission_result.reason}"
+    if permission_result.behavior == "ask":
+        if not permission_manager.ask_user(tool_call.function.name, arguments):
+            logger.info(f"User denied permission for tool call '{tool_call.function.name}' with args {arguments}")
+            return "Permission denied by user."
+
     handler: Optional[Callable] = tool_handlers.get(tool_call.function.name)
     # For subagent tool calls, we want to track recent files accessed by the subagent for better compaction in the main agent
     all_args: Dict[str, Any] = {**arguments, "agent_id": agent_id}

@@ -25,6 +25,16 @@
 - 命令超时限制：30秒超时防止挂起
 - 输出长度限制：防止过长输出影响性能
 
+### 5. **权限管理系统 (新增功能)**
+- **多级权限控制**：支持allow/deny/ask三种权限行为
+- **Bash安全验证**：实时检测并阻止危险的shell命令
+- **灵活的运行模式**：
+  - `default`：标准模式，根据规则和用户确认决定权限
+  - `plan`：规划模式，只允许读取操作，禁止所有写入工具
+  - `auto`：自动模式，自动批准所有只读工具调用
+- **智能拒绝机制**：连续拒绝达到阈值时自动建议切换到更合适的模式
+- **用户友好的交互**：支持一次性确认(y)、永久允许(always)或拒绝(n)
+
 ## 📁 项目结构
 
 ```
@@ -38,7 +48,11 @@
 │   ├── todo.py          # 待办事项管理
 │   ├── compact.py       # 消息压缩优化
 │   ├── ai_config.py     # AI客户端配置
-│   └── directory.py     # 目录路径配置
+│   ├── directory.py     # 目录路径配置
+│   └── permission/      # 权限管理模块（新增）
+│       ├── __init__.py
+│       ├── bash_security.py  # Bash安全验证器
+│       └── permission.py     # 权限管理器
 └── skills/              # 技能目录
     └── buffett-perspective/  # 巴菲特思维技能（示例）
         ├── references/  # 研究资料和证据
@@ -67,6 +81,13 @@ model:
 ```bash
 python src/agent_loop.py
 >> 读取当前的项目，分析项目现有的功能，并在项目根目录下添加README.md介绍项目
+```
+
+### 权限管理使用
+系统会自动在需要时请求权限确认：
+```
+  [Permission] bash with args {"command": "ls -la"}  
+Allow? (y/n/always): y
 ```
 
 ### 技能使用
