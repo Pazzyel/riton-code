@@ -1,8 +1,8 @@
 from typing import List, Dict, Optional, Any
-import json
 import argparse
 import logging
 import asyncio
+import json
 
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -16,6 +16,7 @@ from ai_config import client
 from skill import SKILL_REGISTRY
 from directory import WORKDIR
 from compact import CompactState, try_compact, agent_compact_states
+from hook import HookManager, HookEvent, HookResponse, HookPayload, hook_manager
 
 logger = logging.getLogger(__name__)
 
@@ -120,16 +121,49 @@ async def run_one_loop(state: LoopState) -> bool:
     used_todo: bool = False
     for call in valid_tool_calls:
         tool_call = call["tool_call"]
+        # Skip custom tool
+        if not isinstance(tool_call, ChatCompletionMessageToolCall):
+            logger.warning("Received tool call that is not of type ChatCompletionMessageToolCall, skipping: %s", tool_call)
+            continue
         tool_name = call["name"]
         if tool_name == "todo":
             used_todo = True
+        
+        # add PreToolCall hook here
+        pre_response: HookResponse = await hook_manager.run_hooks(HookEvent(name="PreToolCall", payload=HookPayload(tool_name=tool_name, tool_input=json.loads(tool_call.function.arguments))))
+        for msg in pre_response.messages:
+            state.messages.append({
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "content": f"[Hook message]: {msg}",
+            })
+        if pre_response.blocked:
+            state.messages.append({
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "content": f"[Tool call blocked by hook]: {pre_response.blocked_reason}",
+            })
+            continue
+
         logger.debug("Executing tool call: %s", tool_name)
         output: str = await run_tool(tool_call, PARENT_TOOL_HANDLERS, agent_id=MAIN_AGENT_ID)
+
+        # add PostToolCall hook here
+        post_response: HookResponse = await hook_manager.run_hooks(HookEvent(name="PostToolCall", payload=HookPayload(tool_name=tool_name, tool_input=json.loads(tool_call.function.arguments))))
+        for msg in post_response.messages:
+            state.messages.append({
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "content": f"[Hook message]: {msg}",
+            })
+        
+        # Real tool output should after post hook messages
         state.messages.append({
             "role": "tool",
             "tool_call_id": call["id"],
             "content": output,
         })
+
 
     # Todo reminder should in the back of tool message
     if not used_todo:
@@ -159,6 +193,7 @@ if __name__ == "__main__":
     )
 
     logger.debug("Debug logging enabled")
+
     state: LoopState = LoopState(
         messages=[],
         turn_count=0,
@@ -166,6 +201,15 @@ if __name__ == "__main__":
     )
     compact_state: CompactState = CompactState()
     agent_compact_states[MAIN_AGENT_ID] = compact_state
+
+    # Hook result was ignored
+    start_response: HookResponse = asyncio.run(hook_manager.run_hooks(HookEvent(name="SessionStart", payload=HookPayload())))
+    for msg in start_response.messages:
+        state.messages.append({
+            "role": "system",
+            "content": f"[Hook message]: {msg}",
+        })
+
     while True:
         try:
             query: str = input(">> ")

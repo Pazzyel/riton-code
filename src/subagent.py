@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Callable
 import logging
 import uuid
+import json
 
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
@@ -9,6 +10,7 @@ from tools import TOOLS, TOOL_HANDLERS, run_tool
 from ai_config import client
 import config
 from compact import CompactState, try_compact, agent_compact_states
+from hook import HookEvent, HookPayload, HookResponse, hook_manager
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,14 @@ async def run_subagent(prompt: str,
     subagent_compact_state: CompactState = CompactState()
     subagent_id: str = f"subagent_{uuid.uuid4().hex}"
     agent_compact_states[subagent_id] = subagent_compact_state
+
+    start_response: HookResponse = await hook_manager.run_hooks(HookEvent(name="SessionStart", payload=HookPayload()))
+    for msg in start_response.messages:
+        subagent.messages.append({
+            "role": "system",
+            "content": f"[Hook message]: {msg}",
+        })
+
     for _ in range(max_turns):
         # Compact the subagent's conversation history first
         subagent.messages = await try_compact(subagent.messages, subagent_compact_state)
@@ -94,8 +104,37 @@ async def run_subagent(prompt: str,
         for call in valid_tool_calls:
             tool_call = call["tool_call"]
             tool_name = call["name"]
+
+                    
+            # add PreToolCall hook here
+            pre_response: HookResponse = await hook_manager.run_hooks(HookEvent(name="PreToolCall", payload=HookPayload(tool_name=tool_name, tool_input=json.loads(tool_call.function.arguments))))
+            for msg in pre_response.messages:
+                subagent.messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": f"[Hook message]: {msg}",
+                })
+            if pre_response.blocked:
+                subagent.messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": f"[Tool call blocked by hook]: {pre_response.blocked_reason}",
+                })
+                continue
+
             logger.debug("SubAgent Executing tool call: %s", tool_name)
             output: str = await run_tool(tool_call, subagent.handlers, subagent_id)
+
+            # add PostToolCall hook here
+            post_response: HookResponse = await hook_manager.run_hooks(HookEvent(name="PostToolCall", payload=HookPayload(tool_name=tool_name, tool_input=json.loads(tool_call.function.arguments))))
+            for msg in post_response.messages:
+                subagent.messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": f"[Hook message]: {msg}",
+                })
+
+            # Real tool output should after post hook messages
             subagent.messages.append({
                 "role": "tool",
                 "tool_call_id": call["id"],

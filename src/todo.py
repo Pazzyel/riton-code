@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Dict, Any
 from pydantic import BaseModel
 
 PLAN_REMINDER_THRESHOLD: int = 3  # Number of rounds without updates before sending a reminder
@@ -13,8 +13,11 @@ class TodoManager:
         self.todos: List[TodoItem] = []
         self.rounds_since_update: int = 0
 
-    def update(self, todos: List[TodoItem]) -> str:
+    def update(self, todo_dicts: List[Dict[str, Any]]) -> str:
         """Update the todo list with new items and return a rendered string representation."""
+        
+        todos: List[TodoItem] = [TodoItem.model_validate(todo_dict) for todo_dict in todo_dicts]
+
         validated_todos: List[TodoItem] = []
         in_progress_count: int = 0
         for todo in todos:
@@ -22,11 +25,7 @@ class TodoManager:
             if status in ["pending", "in_progress", "completed"]:
                 if status == "in_progress":
                     in_progress_count += 1
-                validated_todos.append(TodoItem(
-                    content=todo.content,
-                    status=status,
-                    activeForm=todo.activeForm,
-                ))
+                validated_todos.append(todo)
             else:
                 raise ValueError(f"Invalid status '{status}' for todo item: {todo.content}")
         if in_progress_count > 1:
