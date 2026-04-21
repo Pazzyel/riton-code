@@ -11,6 +11,7 @@ from ai_config import client
 import config
 from compact import CompactState, try_compact, agent_compact_states
 from hook import HookEvent, HookPayload, HookResponse, hook_manager
+from prompt.system_prompt import system_prompt_builder
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +36,12 @@ async def run_subagent(prompt: str,
                  tools: List[Dict[str, Any]] = CHILDREN_TOOLS, 
                  handlers: Dict[str, Callable] = TOOL_HANDLERS, 
                  max_turns: int = SUBAGENT_DEFAULT_MAX_TURNS) -> str:
-    init_message: Dict[str, Any] = {"role": "user", "content": prompt}
+    init_message: List[Dict[str, Any]] = [
+        {"role": "system", "content": await system_prompt_builder.build()},
+        {"role": "user", "content": prompt}
+    ]
     subagent: SubagentContext = SubagentContext(
-        messages=[init_message],
+        messages=init_message,
         tools=tools,
         handlers=handlers,
         max_turns=max_turns,

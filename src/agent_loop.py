@@ -1,7 +1,5 @@
 from typing import List, Dict, Optional, Any
-import argparse
 import logging
-import asyncio
 import json
 
 from openai.types.chat.chat_completion import ChatCompletion
@@ -13,43 +11,17 @@ from tools import run_tool, TOOLS, TOOL_HANDLERS, SUBAGENT_TOOLS
 from subagent import run_subagent
 from todo import todo_manager
 from ai_config import client
-from skill import SKILL_REGISTRY
-from directory import WORKDIR
-from compact import CompactState, try_compact, agent_compact_states
+from prompt.system_prompt import system_prompt_builder
+from compact import CompactState, try_compact
 from hook import HookEvent, HookResponse, HookPayload, hook_manager
-from memory.memory import memory_manager
 
 logger = logging.getLogger(__name__)
 
 MAX_TURNS: int = 20  # Maximum number of turns in the agent loop before stopping
 
-MAIN_AGENT_ID: str = "agent_main"
-
 PARENT_TOOL_HANDLERS = TOOL_HANDLERS.copy()
 PARENT_TOOL_HANDLERS["subagent"] = lambda **kw: run_subagent(kw["prompt"])
 PARENT_TOOLS = TOOLS + SUBAGENT_TOOLS
-
-
-def build_system_prompt() -> str:
-    """Build the system prompt for the agent, including available skills and other relevant information."""
-    SYSTEM: str = f"""
-        You are a coding agent at {str(WORKDIR)}. \n
-        Use tools to inspect and change the workspace. Act first, then report clearly.
-    """
-
-    SKILLS_PROMPT: str = f"""
-        <skills>
-        {SKILL_REGISTRY.describe_available()}
-        </skills>
-    """
-
-    MEMORY_PROMPT: str = f"""
-        <memories>
-        {memory_manager.build_memory_prompt()}
-        </memories>
-    """
-
-    return "\n".join([SYSTEM, SKILLS_PROMPT, MEMORY_PROMPT])
 
 class LoopState:
     messages:           List[Dict[str, Any]]    # The list of messages in the conversation history
@@ -61,7 +33,7 @@ class LoopState:
         self.turn_count = turn_count
         self.transition_reason = transition_reason
 
-async def agent_loop(state: LoopState, compact_state: CompactState) -> None:
+async def agent_loop(state: LoopState, compact_state: CompactState, agent_id: str) -> None:
     """
     Run the agent loop until completion.
 
@@ -70,12 +42,12 @@ async def agent_loop(state: LoopState, compact_state: CompactState) -> None:
 
     logger.debug("Starting agent loop")
     state.messages = await try_compact(state.messages, compact_state)
-    while await run_one_loop(state) and state.turn_count < MAX_TURNS:
+    while await run_one_loop(state, agent_id) and state.turn_count < MAX_TURNS:
         state.messages = await try_compact(state.messages, compact_state)
     
     logger.debug("Agent loop finished after %d turns", state.turn_count)
 
-async def run_one_loop(state: LoopState) -> bool:
+async def run_one_loop(state: LoopState, agent_id: str) -> bool:
     """
     Run one loop of the agent's reasoning and acting process.
 
@@ -84,7 +56,7 @@ async def run_one_loop(state: LoopState) -> bool:
     logger.debug("Running loop turn %d", state.turn_count + 1)
     response: ChatCompletion = await client.chat.completions.create(
         model=config.MODEL_ID,
-        messages=[{"role": "system", "content": build_system_prompt()}] + state.messages, # type: ignore
+        messages=[{"role": "system", "content": await system_prompt_builder.build()}] + state.messages, # type: ignore
         tools=PARENT_TOOLS, # type: ignore
         max_tokens=config.MAX_TOKENS,
     )
@@ -159,7 +131,7 @@ async def run_one_loop(state: LoopState) -> bool:
             continue
 
         logger.debug("Executing tool call: %s", tool_name)
-        output: str = await run_tool(tool_call, PARENT_TOOL_HANDLERS, agent_id=MAIN_AGENT_ID)
+        output: str = await run_tool(tool_call, PARENT_TOOL_HANDLERS, agent_id=agent_id)
 
         # add PostToolCall hook here
         post_response: HookResponse = await hook_manager.run_hooks(HookEvent(name="PostToolCall", payload=HookPayload(tool_name=tool_name, tool_input=json.loads(tool_call.function.arguments))))
@@ -193,48 +165,3 @@ async def run_one_loop(state: LoopState) -> bool:
     state.transition_reason = "tool_call"
     logger.debug("Turn %d finished with transition_reason=%s", state.turn_count, state.transition_reason)
     return True
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the coding agent loop.")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging output")
-    args = parser.parse_args()
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-        force=True,
-    )
-
-    logger.debug("Debug logging enabled")
-
-    state: LoopState = LoopState(
-        messages=[],
-        turn_count=0,
-        transition_reason=None,
-    )
-    compact_state: CompactState = CompactState()
-    agent_compact_states[MAIN_AGENT_ID] = compact_state
-
-    # Hook result was ignored
-    start_response: HookResponse = asyncio.run(hook_manager.run_hooks(HookEvent(name="SessionStart", payload=HookPayload())))
-    for msg in start_response.messages:
-        state.messages.append({
-            "role": "system",
-            "content": f"[Hook message]: {msg}",
-        })
-
-    while True:
-        try:
-            query: str = input(">> ")
-        except (EOFError, KeyboardInterrupt):
-            break
-
-        if query.strip().lower() == "exit":
-            break
-
-        state.messages.append({
-            "role": "user",
-            "content": query,
-        })
-        asyncio.run(agent_loop(state, compact_state))
-        print(state.messages[-1]["content"])

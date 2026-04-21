@@ -74,7 +74,7 @@ class SkillRegistry:
 
     def describe_available(self) -> str:
         """Return a string describing the available skills in the registry."""
-        return "\n".join(f"- {name}: {skill.manifest.description}" for name, skill in self.skills.items())
+        return "\n".join(f"- {name}: {skill.manifest.description}" for name, skill in self.skills.items()) + "\n"
 
     def get_content(self, name: str) -> str:
         """Get the full markdown content of a skill by name."""
