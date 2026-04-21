@@ -16,6 +16,7 @@ from skill import load_skill, get_skill_dir
 from directory import WORKDIR
 from compact import track_recent_files, agent_compact_states
 from permission.permission import permission_manager, PermissionResult
+from memory.memory import memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,8 @@ TOOL_HANDLERS: Dict[str, Callable] = {
     "edit_file":  lambda **kw: run_edit(path=kw["path"], old_text=kw["old_text"], new_text=kw["new_text"], agent_id=kw["agent_id"]),
     "todo":       lambda **kw: todo_manager.update(kw["todos"]),
     "load_skill": lambda **kw: load_skill(kw["name"]),
-    "get_skill_dir": lambda **kw: get_skill_dir(kw["name"])
+    "get_skill_dir": lambda **kw: get_skill_dir(kw["name"]),
+    "save_memory": lambda **kw: memory_manager.save_memory(name=kw["name"], description=kw["description"], memory_type=kw["memory_type"], content=kw["content"]),
 }
 
 TOOLS = [
@@ -158,6 +160,26 @@ TOOLS = [
                     "name": {"type": "string", "description": "The name of the skill for which to get the directory path."},
                 },
                 "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": (
+                "Save a memory with a given name, description, type, and content. The memory will be stored in the agent's memory directory and included in the agent's context for future reference. "
+                "This can be used to remember important information, insights, or decisions that the agent wants to retain across turns."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The name of the memory."},
+                    "description": {"type": "string", "description": "A brief description of the memory."},
+                    "memory_type": {"type": "string", "description": "The type of the memory, only in [\"user\", \"feedback\", \"project\", \"reference\"]."},
+                    "content": {"type": "string", "description": "The detailed content of the memory."},
+                },
+                "required": ["name", "description", "memory_type", "content"]
             }
         }
     }

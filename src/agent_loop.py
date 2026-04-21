@@ -16,7 +16,8 @@ from ai_config import client
 from skill import SKILL_REGISTRY
 from directory import WORKDIR
 from compact import CompactState, try_compact, agent_compact_states
-from hook import HookManager, HookEvent, HookResponse, HookPayload, hook_manager
+from hook import HookEvent, HookResponse, HookPayload, hook_manager
+from memory.memory import memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +29,27 @@ PARENT_TOOL_HANDLERS = TOOL_HANDLERS.copy()
 PARENT_TOOL_HANDLERS["subagent"] = lambda **kw: run_subagent(kw["prompt"])
 PARENT_TOOLS = TOOLS + SUBAGENT_TOOLS
 
-SYSTEM = (
-    f"You are a coding agent at {str(WORKDIR)}. "
-    "Use bash to inspect and change the workspace. Act first, then report clearly."
-    f"""
-    <available_skills>
-    {SKILL_REGISTRY.describe_available()}
-    </available_skills>
+
+def build_system_prompt() -> str:
+    """Build the system prompt for the agent, including available skills and other relevant information."""
+    SYSTEM: str = f"""
+        You are a coding agent at {str(WORKDIR)}. \n
+        Use tools to inspect and change the workspace. Act first, then report clearly.
     """
-)
+
+    SKILLS_PROMPT: str = f"""
+        <skills>
+        {SKILL_REGISTRY.describe_available()}
+        </skills>
+    """
+
+    MEMORY_PROMPT: str = f"""
+        <memories>
+        {memory_manager.build_memory_prompt()}
+        </memories>
+    """
+
+    return "\n".join([SYSTEM, SKILLS_PROMPT, MEMORY_PROMPT])
 
 class LoopState:
     messages:           List[Dict[str, Any]]    # The list of messages in the conversation history
@@ -71,7 +84,7 @@ async def run_one_loop(state: LoopState) -> bool:
     logger.debug("Running loop turn %d", state.turn_count + 1)
     response: ChatCompletion = await client.chat.completions.create(
         model=config.MODEL_ID,
-        messages=[{"role": "system", "content": SYSTEM}] + state.messages, # type: ignore
+        messages=[{"role": "system", "content": build_system_prompt()}] + state.messages, # type: ignore
         tools=PARENT_TOOLS, # type: ignore
         max_tokens=config.MAX_TOKENS,
     )
