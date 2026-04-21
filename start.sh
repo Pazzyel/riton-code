@@ -1,1 +1,1 @@
-python3 src/agent_loop.py
+python3 src/main.py
