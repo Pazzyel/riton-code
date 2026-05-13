@@ -2,6 +2,7 @@ from typing import List, Dict, Any, Callable
 import logging
 import uuid
 import json
+import asyncio
 
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
@@ -12,6 +13,7 @@ import config
 from compact import CompactState, try_compact, agent_compact_states
 from hook import HookEvent, HookPayload, HookResponse, hook_manager
 from prompt.system_prompt import system_prompt_builder
+from recovery import choose_recovery, RecoveryType, CONTINUE_MESSAGE, backoff_delay
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ class SubagentContext:
         self.handlers = handlers
         self.max_turns = max_turns
 
+retry_count = 0  # Global retry count for backoff strategy
 async def run_subagent(prompt: str, 
                  tools: List[Dict[str, Any]] = CHILDREN_TOOLS, 
                  handlers: Dict[str, Callable] = TOOL_HANDLERS, 
@@ -61,12 +64,44 @@ async def run_subagent(prompt: str,
         # Compact the subagent's conversation history first
         subagent.messages = await try_compact(subagent.messages, subagent_compact_state)
         
-        response = await client.chat.completions.create(
-            model=config.MODEL_ID,
-            messages=subagent.messages, # type: ignore
-            tools=subagent.tools, # type: ignore
-            max_tokens=config.MAX_TOKENS,
-        )
+        try:
+            response = await client.chat.completions.create(
+                model=config.MODEL_ID,
+                messages=subagent.messages, # type: ignore
+                tools=subagent.tools, # type: ignore
+                max_tokens=config.MAX_TOKENS,
+            )
+            stop_reason: str = response.choices[0].finish_reason
+            decision: RecoveryType = choose_recovery(stop_reason, None)
+        except Exception as e:
+            logger.error("Error during chat completion: %s", str(e))
+            error_text = str(e)
+            decision: RecoveryType = choose_recovery(None, error_text)
+
+        global retry_count
+        match decision.type:
+            case "continue":
+                retry_count = 0  # Reset retry count on success
+                subagent.messages.append({
+                    "role": "user",
+                    "content": CONTINUE_MESSAGE,
+                })
+                continue  # Continue the loop
+            case "compact":
+                retry_count = 0  # Reset retry count on success
+                logger.info("Compacting conversation history due to context length")
+                subagent.messages = await try_compact(subagent.messages, subagent_compact_state)
+                continue  # Continue the loop after compacting
+            case "backoff":
+                logger.warning("Encountered transient error, backing off before retrying")
+                await asyncio.sleep(backoff_delay(retry_count))  # Simple backoff strategy, can be improved with exponential backoff
+                retry_count += 1
+            case "fail":
+                retry_count = 0  # Reset retry count on unrecoverable error
+                logger.error("Unrecoverable error encountered, stopping agent loop")
+                break  # Stop the loop on unrecoverable error
+
+        retry_count = 0  # Reset retry count on success or unrecoverable error
         assistant_message: ChatCompletionMessage = response.choices[0].message
         valid_tool_calls: List[Dict[str, Any]] = []
         if assistant_message.tool_calls:

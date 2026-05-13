@@ -1,6 +1,7 @@
 from typing import List, Dict, Optional, Any
 import logging
 import json
+import asyncio
 
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -14,6 +15,7 @@ from ai_config import client
 from prompt.system_prompt import system_prompt_builder
 from compact import CompactState, try_compact
 from hook import HookEvent, HookResponse, HookPayload, hook_manager
+from recovery import choose_recovery, RecoveryType, CONTINUE_MESSAGE, backoff_delay
 
 logger = logging.getLogger(__name__)
 
@@ -42,24 +44,57 @@ async def agent_loop(state: LoopState, compact_state: CompactState, agent_id: st
 
     logger.debug("Starting agent loop")
     state.messages = await try_compact(state.messages, compact_state)
-    while await run_one_loop(state, agent_id) and state.turn_count < MAX_TURNS:
+    while await run_one_loop(state, agent_id, compact_state) and state.turn_count < MAX_TURNS:
         state.messages = await try_compact(state.messages, compact_state)
     
     logger.debug("Agent loop finished after %d turns", state.turn_count)
 
-async def run_one_loop(state: LoopState, agent_id: str) -> bool:
+retry_count = 0  # Initialize retry count for backoff strategy
+async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactState) -> bool:
     """
     Run one loop of the agent's reasoning and acting process.
 
     Returns True if the loop should continue, or False if it should stop.
     """
     logger.debug("Running loop turn %d", state.turn_count + 1)
-    response: ChatCompletion = await client.chat.completions.create(
-        model=config.MODEL_ID,
-        messages=[{"role": "system", "content": await system_prompt_builder.build()}] + state.messages, # type: ignore
-        tools=PARENT_TOOLS, # type: ignore
-        max_tokens=config.MAX_TOKENS,
-    )
+    try:
+        response: ChatCompletion = await client.chat.completions.create(
+            model=config.MODEL_ID,
+            messages=[{"role": "system", "content": await system_prompt_builder.build()}] + state.messages, # type: ignore
+            tools=PARENT_TOOLS, # type: ignore
+            max_tokens=config.MAX_TOKENS,
+        )
+        stop_reason: Optional[str] = response.choices[0].finish_reason
+        decision: RecoveryType = choose_recovery(stop_reason, None)
+    except Exception as e:
+        logger.error("Error during chat completion: %s", str(e))
+        error_text = str(e)
+        decision: RecoveryType = choose_recovery(None, error_text)
+
+    global retry_count
+    match decision.type:
+        case "continue":
+            retry_count = 0  # Reset retry count on success
+            state.messages.append({
+                "role": "user",
+                "content": CONTINUE_MESSAGE,
+            })
+            return True  # Continue the loop
+        case "compact":
+            retry_count = 0  # Reset retry count on success
+            logger.info("Compacting conversation history due to context length")
+            state.messages = await try_compact(state.messages, compact_state)
+            return True  # Continue the loop after compacting
+        case "backoff":
+            logger.warning("Encountered transient error, backing off before retrying")
+            await asyncio.sleep(backoff_delay(retry_count))  # Simple backoff strategy, can be improved with exponential backoff
+            retry_count += 1
+        case "fail":
+            retry_count = 0  # Reset retry count on unrecoverable error
+            logger.error("Unrecoverable error encountered, stopping agent loop")
+            return False  # Stop the loop on unrecoverable error
+
+    retry_count = 0  # Reset retry count on success or unrecoverable error
     assistant_message: ChatCompletionMessage = response.choices[0].message
     valid_tool_calls: List[Dict[str, Any]] = []
     # if a assistant message includes tool calls
