@@ -17,6 +17,7 @@ from directory import WORKDIR
 from compact import track_recent_files, agent_compact_states
 from permission.permission import permission_manager, PermissionResult
 from memory.memory import memory_manager
+from task import TASKS_MANAGER
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,16 @@ TOOL_HANDLERS: Dict[str, Callable] = {
     "load_skill": lambda **kw: load_skill(kw["name"]),
     "get_skill_dir": lambda **kw: get_skill_dir(kw["name"]),
     "save_memory": lambda **kw: memory_manager.save_memory(name=kw["name"], description=kw["description"], memory_type=kw["memory_type"], content=kw["content"]),
+    "task_create": lambda **kw: TASKS_MANAGER.create(subject=kw["subject"], description=kw.get("description", ""), owner=kw.get("owner", "")),
+    "task_get": lambda **kw: TASKS_MANAGER.get(task_id=kw["task_id"]),
+    "task_list": lambda **kw: TASKS_MANAGER.list_all(),
+    "task_update": lambda **kw: TASKS_MANAGER.update_dependencies(
+        task_id=kw["task_id"],
+        status=kw.get("status"),
+        owner=kw.get("owner"),
+        add_blocked_by=kw.get("add_blocked_by"),
+        add_blocks=kw.get("add_blocks")
+    )
 }
 
 TOOLS = [
@@ -180,6 +191,68 @@ TOOLS = [
                     "content": {"type": "string", "description": "The detailed content of the memory."},
                 },
                 "required": ["name", "description", "memory_type", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_create",
+            "description": "Create a new task with a subject, description, and owner. The task will be saved in the task manager and returned its schema. You can retrieve later by its ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "The subject of the task."},
+                    "description": {"type": "string", "description": "A detailed description of the task."},
+                    "owner": {"type": "string", "description": "The owner of the task."}
+                },
+                "required": ["subject"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_get",
+            "description": "Get a task by its ID. This will return the task's json schema including its subject, description, owner, status, and dependencies.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "integer", "description": "The ID of the task to retrieve."},
+                },
+                "required": ["task_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_list",
+            "description": "List all tasks. This will return a rendered string representation of all tasks with their ID, subject, owner, status, and dependencies.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_update",
+            "description": (
+                "Update a task's status, owner, and dependencies. You can change the task's status to 'pending', 'in_progress', 'completed', or 'deleted'. "
+                "You can also update the task's owner or add dependencies by specifying other task IDs that it is blocked by or that it blocks."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "integer", "description": "The ID of the task to update."},
+                    "status": {"type": "string", "description": "The new status of the task, one of 'pending', 'in_progress', 'completed', 'deleted'."},
+                    "owner": {"type": "string", "description": "The new owner of the task."},
+                    "add_blocked_by": {"type": "array", "items": {"type": "integer"}, "description": "A list of task IDs that this task is now blocked by."},
+                    "add_blocks": {"type": "array", "items": {"type": "integer"}, "description": "A list of task IDs that this task now blocks."},
+                },
+                "required": ["task_id"]
             }
         }
     }
