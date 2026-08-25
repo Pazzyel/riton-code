@@ -18,6 +18,7 @@ from compact import track_recent_files, agent_compact_states
 from permission.permission import permission_manager, PermissionResult
 from memory.memory import memory_manager
 from task import TASKS_MANAGER
+from background import BackgroundManager, BACKGROUND_MANAGER
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +299,13 @@ async def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict
         try:
             # Handlers may be sync wrappers (e.g. lambdas) that return a coroutine.
             # Always inspect the call result and await when needed.
-            result = handler(**all_args)
+
+            # Background tool check
+            if BACKGROUND_MANAGER.should_run_in_background(tool_call.function.name, all_args):
+                task_id: str = BACKGROUND_MANAGER.start_background_task(handler, all_args)
+                result = f"[Background task {task_id} started]\nCommand: {arguments.get('command', '')}.\nResult will be available when complete in the <task_notifications> section of the user input."
+            else:
+                result = handler(**all_args)
             # You couldn'd use inspect.iscoroutine here
             # Because handlers use lambda warppers, and the lambda is not async
             # But it still returns a coroutine when it calls the async function inside

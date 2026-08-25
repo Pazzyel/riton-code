@@ -1,1 +1,0 @@
-- python_type_annotation_policy: 项目要求：Python 项目函数参数、返回值和变量首次声明必须写类型注解，且禁止通过动态类型特性改变变量类型。 [project]

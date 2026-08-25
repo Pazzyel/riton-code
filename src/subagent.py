@@ -4,6 +4,7 @@ import uuid
 import json
 import asyncio
 
+from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 
@@ -14,6 +15,7 @@ from compact import CompactState, try_compact, agent_compact_states
 from hook import HookEvent, HookPayload, HookResponse, hook_manager
 from prompt.system_prompt import system_prompt_builder
 from recovery import choose_recovery, RecoveryType, CONTINUE_MESSAGE, backoff_delay
+from background import BackgroundManager, BACKGROUND_MANAGER
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +67,16 @@ async def run_subagent(prompt: str,
         subagent.messages = await try_compact(subagent.messages, subagent_compact_state)
         
         try:
-            response = await client.chat.completions.create(
+            response: ChatCompletion = await client.chat.completions.create(
                 model=config.MODEL_ID,
                 messages=subagent.messages, # type: ignore
                 tools=subagent.tools, # type: ignore
                 max_tokens=config.MAX_TOKENS,
             )
             stop_reason: str = response.choices[0].finish_reason
+            if stop_reason == "stop":
+                # Stop the loop if the model has finished its reasoning and acting process
+                break  
             decision: RecoveryType = choose_recovery(stop_reason, None)
         except Exception as e:
             logger.error("Error during chat completion: %s", str(e))
@@ -178,6 +183,14 @@ async def run_subagent(prompt: str,
                 "role": "tool",
                 "tool_call_id": call["id"],
                 "content": output,
+            })
+
+        # Background task notifications should be in the back of tool message
+        background_notifications: str = BACKGROUND_MANAGER.get_background_task_notification()
+        if background_notifications is not None and background_notifications.strip() != "":
+            subagent.messages.append({
+                "role": "user",
+                "content": background_notifications,
             })
 
     # TODO Now the subagent summarizes is only using the contact of the assistant messages

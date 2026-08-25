@@ -16,6 +16,7 @@ from prompt.system_prompt import system_prompt_builder
 from compact import CompactState, try_compact
 from hook import HookEvent, HookResponse, HookPayload, hook_manager
 from recovery import choose_recovery, RecoveryType, CONTINUE_MESSAGE, backoff_delay
+from background import BackgroundManager, BACKGROUND_MANAGER
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +196,14 @@ async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactSt
                 "role": "user",
                 "content": remainder,
             })
+
+    # Background task notifications should be in the back of tool message
+    background_notifications: str = BACKGROUND_MANAGER.get_background_task_notification()
+    if background_notifications is not None and background_notifications.strip() != "":
+        state.messages.append({
+            "role": "user",
+            "content": background_notifications,
+        })
 
     state.turn_count += 1
     state.transition_reason = "tool_call"
