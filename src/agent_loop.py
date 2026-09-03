@@ -16,7 +16,8 @@ from prompt.system_prompt import system_prompt_builder
 from compact import CompactState, try_compact
 from hook import HookEvent, HookResponse, HookPayload, hook_manager
 from recovery import choose_recovery, RecoveryType, CONTINUE_MESSAGE, backoff_delay
-from background import BackgroundManager, BACKGROUND_MANAGER
+from background import BACKGROUND_MANAGER
+from cron import CRON_TRIGGER_INTERVAL, CronJob, cron_lock, cron_queue
 
 logger = logging.getLogger(__name__)
 
@@ -209,3 +210,43 @@ async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactSt
     state.transition_reason = "tool_call"
     logger.debug("Turn %d finished with transition_reason=%s", state.turn_count, state.transition_reason)
     return True
+
+
+
+
+
+# 把CRON任务Agent执行的部分移动到这里，防止循环依赖
+
+# 为防死锁，固定先加agent_lock，再加cron_lock
+agent_lock: asyncio.Lock = asyncio.Lock()  # User input and cron job may race
+
+
+async def queue_processor_loop(state: LoopState, compact_state: CompactState, agent_id: str):
+    while True:
+        await asyncio.sleep(CRON_TRIGGER_INTERVAL)
+        if not await has_cron_queue():
+            continue
+        async with agent_lock:
+            if not await has_cron_queue():
+                continue
+            logger.info(f"[cron] Processing {len(cron_queue)} queued jobs")
+            triggered_jobs: List[CronJob] = await consume_cron_queue()
+            for job in triggered_jobs:
+                logger.info(f"[cron] Injecting job {job.id} into agent loop")
+                state.messages.append({
+                    "role": "user",
+                    "content": f"[cron job {job.id}] {job.prompt}",
+                })
+            await agent_loop(state, compact_state, agent_id)
+
+async def has_cron_queue() -> bool:
+    """Check if there are any jobs in the cron_queue."""
+    async with cron_lock:
+        return len(cron_queue) > 0
+
+async def consume_cron_queue() -> List[CronJob]:
+    """Consume and return all jobs in the cron_queue."""
+    async with cron_lock:
+        jobs: List[CronJob] = list(cron_queue)
+        cron_queue.clear()
+        return jobs

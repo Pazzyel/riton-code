@@ -2,11 +2,35 @@ import argparse
 import logging
 import asyncio
 
-from agent_loop import LoopState, agent_loop
+from agent_loop import LoopState, agent_loop, queue_processor_loop, agent_lock
 from compact import CompactState, agent_compact_states
 from hook import HookEvent, HookPayload, HookResponse, hook_manager
+from cron import cron_schedule_loop
 
 MAIN_AGENT_ID: str = "agent_main"
+
+async def input_loop(state: LoopState, compact_state: CompactState, agent_id: str):
+    """Asynchronous input loop to read user input and feed it into the agent loop."""
+    while True:
+        query: str = await asyncio.get_event_loop().run_in_executor(None, input, ">> ")
+        if query.strip().lower() == "exit":
+            break
+
+        async with agent_lock:
+            state.messages.append({
+                "role": "user",
+                "content": query,
+            })
+            await agent_loop(state, compact_state, agent_id)
+            print(state.messages[-1]["content"])
+
+async def loops(state: LoopState, compact_state: CompactState, agent_id: str):
+    # 包含输入线程，定时器检查线程，和cron队列处理线程
+    await asyncio.gather(
+        cron_schedule_loop(),
+        queue_processor_loop(state, compact_state, agent_id),
+        input_loop(state, compact_state, agent_id)
+    )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the coding agent loop.")
@@ -39,18 +63,5 @@ if __name__ == "__main__":
             "content": f"[Hook message]: {msg}",
         })
 
-    while True:
-        try:
-            query: str = input(">> ")
-        except (EOFError, KeyboardInterrupt):
-            break
+    asyncio.run(loops(state, compact_state, MAIN_AGENT_ID))
 
-        if query.strip().lower() == "exit":
-            break
-
-        state.messages.append({
-            "role": "user",
-            "content": query,
-        })
-        asyncio.run(agent_loop(state, compact_state, MAIN_AGENT_ID))
-        print(state.messages[-1]["content"])

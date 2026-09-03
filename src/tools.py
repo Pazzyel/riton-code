@@ -19,6 +19,7 @@ from permission.permission import permission_manager, PermissionResult
 from memory.memory import memory_manager
 from task import TASKS_MANAGER
 from background import BackgroundManager, BACKGROUND_MANAGER
+from cron import schedule_job, cancel_job, list_jobs, CronJob
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,10 @@ TOOL_HANDLERS: Dict[str, Callable] = {
         owner=kw.get("owner"),
         add_blocked_by=kw.get("add_blocked_by"),
         add_blocks=kw.get("add_blocks")
-    )
+    ),
+    "schedule_cron": lambda **kw: run_schedule_cron(cron_expression=kw["cron_expression"], prompt=kw["prompt"], recurring=kw.get("recurring", False), durable=kw.get("durable", False)),
+    "list_cron": lambda **kw: run_list_cron(),
+    "cancel_cron": lambda **kw: run_cancel_cron(job_id=kw["job_id"]),
 }
 
 TOOLS = [
@@ -256,6 +260,48 @@ TOOLS = [
                 "required": ["task_id"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_cron",
+            "description": "Schedule a cron job. cron is 5-field: min hour dom month dow.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cron_expression": {"type": "string", "description": "5-field cron expression"},
+                    "prompt": {"type": "string", "description": "Message to inject when fired"},
+                    "recurring": {"type": "boolean", "description": "True=recurring, False=one-shot"},
+                    "durable": {"type": "boolean", "description": "True=persist to disk"}
+                },
+                "required": ["cron_expression", "prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_crons",
+            "description": "List all registered cron jobs.",
+            "parameters": {
+                "type": "object", 
+                "properties": {},
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_cron",
+            "description": "Cancel a cron job by ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"}
+                },
+                "required": ["job_id"]
+            }
+        }
     }
 ]
 
@@ -395,3 +441,18 @@ async def run_edit(path: str, old_text: str, new_text: str, agent_id: str = "") 
     async with aiofiles.open(file_path, mode='w') as f:
         await f.write(updated_text)
     return "File edited successfully."
+
+async def run_schedule_cron(cron_expression: str, prompt: str, recurring: bool = True, durable: bool = False) -> str:
+    """Schedule a cron job with the given expression and prompt."""
+    result: CronJob | str = await schedule_job(cron_expression, prompt, recurring, durable)
+    if isinstance(result, str):
+        return f"Error: {result}"
+    return f"Scheduled {result.id}: '{result.cron}' → {result.prompt}"
+
+async def run_cancel_cron(job_id: str) -> str:
+    """Cancel a scheduled cron job by its ID."""
+    return await cancel_job(job_id)
+
+async def run_list_cron() -> str:
+    """List all scheduled cron jobs."""
+    return await list_jobs()
