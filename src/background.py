@@ -1,10 +1,12 @@
 from threading import Lock, Thread
-import time
+import time, inspect, asyncio, logging
 
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Awaitable
 from typing_extensions import Literal
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_LENGTH = 50000
 MAX_PREVIEW_LENGTH = 50000
@@ -63,8 +65,17 @@ class BackgroundManager:
         background_task_id: str = f"bg_task_{_background_counter}"
 
         def worker():
+            # A isolation thread not belong to the event loop
             try:
+                logger.debug(f"Background task {background_task_id} started for agent {agent_id}.")
                 result: Any = handler(**tool_input)
+                if inspect.isawaitable(result):
+                    # If the handler is a coroutine, run it in the event loop
+                    awaitable_result: Awaitable = result
+                    async def run_async():
+                        return await awaitable_result
+                    result = asyncio.run(run_async())
+                    
             except Exception as e:
                 result = f"Error: {e}"
             
@@ -78,6 +89,7 @@ class BackgroundManager:
                     self.runtime_tasks[background_task_id].status = "completed"
                 self.runtime_tasks[background_task_id].finish_at = time.time()
                 self.runtime_tasks[background_task_id].result_preview = self._preview(str(result))
+                logger.debug(f"Background task {background_task_id} completed.")
 
         with self._lock.setdefault(background_task_id, Lock()):
             self.runtime_tasks[background_task_id] = RuntimeTaskRecord(
@@ -110,6 +122,7 @@ class BackgroundManager:
     def get_background_task_notification(self, agent_id: str) -> str:
         """Get a notification string for any completed background tasks."""
         completed_tasks: List[RuntimeTaskRecord] = self._collect_background_task_result(agent_id)
+        logger.info(f"Collected {len(completed_tasks)} completed background tasks for agent {agent_id}.")
         if not completed_tasks:
             return ""
         notifications: str = "<task_notifications>\n"

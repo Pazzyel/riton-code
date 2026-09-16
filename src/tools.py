@@ -322,6 +322,13 @@ SUBAGENT_TOOLS = [
     }
 ]
 
+# Add run_in_background property to all tools
+for tool in TOOLS:
+    tool["function"]["parameters"]["properties"]["run_in_background"] = {"type": "boolean", "description": "Optional flag to indicate if the tool should run in the background. Default is False."}
+
+for tool in SUBAGENT_TOOLS:
+    tool["function"]["parameters"]["properties"]["run_in_background"] = {"type": "boolean", "description": "Optional flag to indicate if the tool should run in the background. Default is False."}
+
 async def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict[str, Callable], agent_id: str) -> str:
     """Run a tool call using the provided handlers and return the output."""
     # TODO: Add support for more tools'
@@ -348,9 +355,11 @@ async def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict
 
             # Background tool check
             if BACKGROUND_MANAGER.should_run_in_background(tool_call.function.name, all_args):
+                all_args.pop("run_in_background", None)
                 task_id: str = BACKGROUND_MANAGER.start_background_task(handler, all_args, agent_id)
                 result = f"[Background task {task_id} started]\nCommand: {arguments.get('command', '')}.\nResult will be available when complete in the <task_notifications> section of the user input."
             else:
+                all_args.pop("run_in_background", None)
                 result = handler(**all_args)
             # You couldn'd use inspect.iscoroutine here
             # Because handlers use lambda warppers, and the lambda is not async
