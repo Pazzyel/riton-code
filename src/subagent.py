@@ -186,7 +186,7 @@ async def run_subagent(prompt: str,
             })
 
         # Background task notifications should be in the back of tool message
-        background_notifications: str = BACKGROUND_MANAGER.get_background_task_notification()
+        background_notifications: str = BACKGROUND_MANAGER.get_background_task_notification(subagent_id)
         if background_notifications is not None and background_notifications.strip() != "":
             subagent.messages.append({
                 "role": "user",

@@ -199,7 +199,7 @@ async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactSt
             })
 
     # Background task notifications should be in the back of tool message
-    background_notifications: str = BACKGROUND_MANAGER.get_background_task_notification()
+    background_notifications: str = BACKGROUND_MANAGER.get_background_task_notification(agent_id)
     if background_notifications is not None and background_notifications.strip() != "":
         state.messages.append({
             "role": "user",

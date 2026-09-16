@@ -348,7 +348,7 @@ async def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict
 
             # Background tool check
             if BACKGROUND_MANAGER.should_run_in_background(tool_call.function.name, all_args):
-                task_id: str = BACKGROUND_MANAGER.start_background_task(handler, all_args)
+                task_id: str = BACKGROUND_MANAGER.start_background_task(handler, all_args, agent_id)
                 result = f"[Background task {task_id} started]\nCommand: {arguments.get('command', '')}.\nResult will be available when complete in the <task_notifications> section of the user input."
             else:
                 result = handler(**all_args)

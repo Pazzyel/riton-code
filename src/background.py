@@ -12,6 +12,7 @@ _background_counter: int = 0  # Global counter for background tasks
 
 class RuntimeTaskRecord(BaseModel):
     id: str
+    agent_id: str
     command: str
     status: Literal["running", "completed", "timeout", "error"] = "running"
     result: str = ""
@@ -52,9 +53,10 @@ class BackgroundManager:
         # otherwise check if it's a slow operation
         if tool_input.get("run_in_background", False) is True:
             return True
-        return self.is_slow_operation(tool_name, tool_input)
+        # return self.is_slow_operation(tool_name, tool_input)
+        return False
 
-    def start_background_task(self, handler: Callable, tool_input: Dict[str, Any]) -> str:
+    def start_background_task(self, handler: Callable, tool_input: Dict[str, Any], agent_id: str) -> str:
         """Start a background task for the given tool and input. Return the task ID."""
         global _background_counter
         _background_counter += 1
@@ -80,6 +82,7 @@ class BackgroundManager:
         with self._lock.setdefault(background_task_id, Lock()):
             self.runtime_tasks[background_task_id] = RuntimeTaskRecord(
                 id=background_task_id,
+                agent_id=agent_id,
                 command=tool_input.get("command", ""),
                 status="running",
                 start_at=time.time(),
@@ -89,12 +92,12 @@ class BackgroundManager:
         thread.start()
         return background_task_id
 
-    def _collect_background_task_result(self) -> List[RuntimeTaskRecord]:
+    def _collect_background_task_result(self, agent_id: str) -> List[RuntimeTaskRecord]:
         """Collect the result of a background task if it's completed."""
         completed_tasks: List[RuntimeTaskRecord] = []
         for background_task_id, task_record in self.runtime_tasks.items():
             with self._lock.get(background_task_id, Lock()):
-                if task_record.status in ["completed", "timeout", "error"]:
+                if task_record.status in ["completed", "timeout", "error"] and task_record.agent_id == agent_id:
                     completed_tasks.append(task_record)
         # When finding completed tasks, remove them from the runtime_tasks dictionary
         # If a task is completed, no other thread should be able to access it, so it's safe to remove it from the dictionary
@@ -104,9 +107,9 @@ class BackgroundManager:
                 
         return completed_tasks
 
-    def get_background_task_notification(self) -> str:
+    def get_background_task_notification(self, agent_id: str) -> str:
         """Get a notification string for any completed background tasks."""
-        completed_tasks: List[RuntimeTaskRecord] = self._collect_background_task_result()
+        completed_tasks: List[RuntimeTaskRecord] = self._collect_background_task_result(agent_id)
         if not completed_tasks:
             return ""
         notifications: str = "<task_notifications>\n"
