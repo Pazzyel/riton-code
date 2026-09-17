@@ -12,7 +12,7 @@ from tools import run_tool
 logger = logging.getLogger(__name__)
 
 CheckpointCallback = Callable[[], None]
-ToolCompletionCallback = Callable[[str, Dict[str, Any]], None]
+ToolCompletionCallback = Callable[[str, Dict[str, Any]], bool]
 
 
 async def execute_tool_call(
@@ -21,9 +21,9 @@ async def execute_tool_call(
     handlers: Dict[str, Callable],
     agent_id: str,
     checkpoint_callback: Optional[CheckpointCallback] = None,
-    completion_callback: Optional[ToolCompletionCallback] = None, # 目前只有一种，就算清除完成的subagent的checkpoint
+    completion_callback: Optional[ToolCompletionCallback] = None,
 ) -> str:
-    """ Execute tool call, and save checkpoint"""
+    """Execute a tool call and persist its terminal result."""
     tool_call: ChatCompletionMessageToolCall = (
         ChatCompletionMessageToolCall.model_validate(tool_call_payload)
     )
@@ -56,11 +56,12 @@ async def execute_tool_call(
                 "content": f"[Tool call blocked by hook]: {pre_response.blocked_reason}",
             }
         )
-        # 就算被阻止也持久化工具阻止的结果
-        if checkpoint_callback is not None:
-            checkpoint_callback()
+        # 就算被阻止也持久化工具阻止的结果。
+        checkpoint_handled: bool = False
         if completion_callback is not None:
-            completion_callback(tool_name, completion_input)
+            checkpoint_handled = completion_callback(tool_name, completion_input)
+        if not checkpoint_handled and checkpoint_callback is not None:
+            checkpoint_callback()
         return tool_name
 
     logger.debug("Executing tool call: %s", tool_name)
@@ -87,10 +88,11 @@ async def execute_tool_call(
         }
     )
     # 工具正常执行后就持久化，避免重复调用
-    if checkpoint_callback is not None:
-        checkpoint_callback()
+    checkpoint_handled = False
     if completion_callback is not None:
-        completion_callback(tool_name, completion_input)
+        checkpoint_handled = completion_callback(tool_name, completion_input)
+    if not checkpoint_handled and checkpoint_callback is not None:
+        checkpoint_callback()
     return tool_name
 
 
@@ -111,7 +113,8 @@ async def recover_tool_call(
         handlers: all tool handlers
         agent_id: The agent id, who call this tool
         checkpoint_callback: The function which save checkpoint
-        completion_callback: The function which save completion, now only clean subagent call
+        completion_callback: Persist special completion state and report whether it
+            already saved the checkpoint.
     """
     tool_call: ChatCompletionMessageToolCall = (
         ChatCompletionMessageToolCall.model_validate(tool_call_payload)

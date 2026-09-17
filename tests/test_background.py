@@ -18,6 +18,34 @@ from tool_execution import recover_tool_call  # noqa: E402
 
 
 class BackgroundRecoveryTests(unittest.TestCase):
+    def test_completion_callback_can_commit_without_duplicate_checkpoint(self) -> None:
+        manager: BackgroundManager = BackgroundManager()
+        completed: Event = Event()
+        checkpoint_count: list[int] = [0]
+
+        def checkpoint_changed() -> None:
+            checkpoint_count[0] += 1
+
+        def completion_committed(task: RuntimeTaskRecord) -> bool:
+            self.assertEqual("completed", task.status)
+            completed.set()
+            return True
+
+        def handler(**kwargs: str) -> str:
+            return kwargs["value"]
+
+        manager.set_callbacks(checkpoint_changed, completion_committed)
+        manager.start_background_task(
+            handler,
+            "subagent",
+            {"value": "done"},
+            "session_test",
+        )
+
+        self.assertTrue(completed.wait(timeout=2))
+        time.sleep(0.05)
+        self.assertEqual(1, checkpoint_count[0])
+
     def test_running_task_is_resumed_and_completed_task_is_not(self) -> None:
         manager: BackgroundManager = BackgroundManager()
         running_task: RuntimeTaskRecord = RuntimeTaskRecord(

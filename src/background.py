@@ -42,13 +42,15 @@ class BackgroundManager:
         # self.notification_queue: List[Notification] = []
         self._lock: Dict[str, Lock] = {}
         self._manager_lock: RLock = RLock()
+        # 目前传入的change_callback的唯一行为是更新当前主agent的checkpoint
         self._change_callback: Optional[Callable[[], None]] = None
-        self._completion_callback: Optional[Callable[[RuntimeTaskRecord], None]] = None
+        # 目前传入的completion_callback的唯一行为是更新当前主agent的checkpoint并删除子agent的
+        self._completion_callback: Optional[Callable[[RuntimeTaskRecord], bool]] = None
 
     def set_callbacks(
         self,
         change_callback: Optional[Callable[[], None]],
-        completion_callback: Optional[Callable[[RuntimeTaskRecord], None]] = None,
+        completion_callback: Optional[Callable[[RuntimeTaskRecord], bool]] = None,
     ) -> None:
         self._change_callback = change_callback
         self._completion_callback = completion_callback
@@ -156,9 +158,11 @@ class BackgroundManager:
                 current_task.result_preview = self._preview(str(result))
                 completed_task: RuntimeTaskRecord = current_task.model_copy(deep=True)
                 logger.debug(f"Background task {background_task_id} completed.")
-            self._notify_change()
+            checkpoint_handled: bool = False
             if self._completion_callback is not None:
-                self._completion_callback(completed_task)
+                checkpoint_handled = self._completion_callback(completed_task)
+            if not checkpoint_handled:
+                self._notify_change()
 
         thread: Thread = Thread(target=worker, daemon=True)
         thread.start()

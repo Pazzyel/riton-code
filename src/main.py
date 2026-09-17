@@ -21,6 +21,8 @@ from persistence import (
 
 logger = logging.getLogger(__name__)
 
+# 目前传入的change_callback，checkpoint_callback的唯一行为是更新当前主agent的checkpoint
+# 目前传入的completion_callback的唯一行为是更新当前主agent的checkpoint并删除子agent的
 
 def build_parser() -> argparse.ArgumentParser:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
@@ -85,11 +87,7 @@ async def run_session(
         recover_pending_tool_calls,
     )
     from background import BACKGROUND_MANAGER, RuntimeTaskRecord
-    from checkpoint import (
-        build_main_checkpoint,
-        resolved_foreground_subagent_call_ids,
-        subagent_id_for,
-    )
+    from checkpoint import build_main_checkpoint, subagent_id_for
     from compact import CompactState, agent_compact_states
     from cron import cron_schedule_loop
     from hook import HookEvent, HookPayload, HookResponse, hook_manager
@@ -165,26 +163,35 @@ async def run_session(
             payload: Dict[str, Any] = current_payload()
             store.save_checkpoint(session_id, session_id, "main", payload)
 
-    def cleanup_completed_subagent(tool_name: str, tool_input: Dict[str, Any]) -> None:
-        if tool_name != "subagent" or tool_input.get("run_in_background") is True:
-            return
-        parent_tool_call_id: Any = tool_input.get("tool_call_id")
-        if isinstance(parent_tool_call_id, str):
-            store.delete_checkpoint(
+    def save_parent_and_delete_subagent(parent_tool_call_id: Any) -> bool:
+        if not isinstance(parent_tool_call_id, str):
+            return False
+        with checkpoint_lock:
+            payload: Dict[str, Any] = current_payload()
+            store.save_parent_checkpoint_and_delete_child(
                 session_id,
+                session_id,
+                "main",
+                payload,
                 subagent_id_for(session_id, parent_tool_call_id),
             )
+        return True
 
-    def background_completed(task: RuntimeTaskRecord) -> None:
-        """在后台任务完成后的回调，目前只有一种任务回调，就是subagent调用，回调是删掉它的checkpoint"""
+    def save_completed_foreground_subagent(
+        tool_name: str,
+        tool_input: Dict[str, Any],
+    ) -> bool:
+        if tool_name != "subagent" or tool_input.get("run_in_background") is True:
+            return False
+        parent_tool_call_id: Any = tool_input.get("tool_call_id")
+        return save_parent_and_delete_subagent(parent_tool_call_id)
+
+    def background_completed(task: RuntimeTaskRecord) -> bool:
+        """后台 subagent 完成时，原子保存父状态并删除子 checkpoint。"""
         if task.tool_name != "subagent":
-            return
+            return False
         parent_tool_call_id: Any = task.tool_input.get("tool_call_id")
-        if isinstance(parent_tool_call_id, str):
-            store.delete_checkpoint(
-                session_id,
-                subagent_id_for(session_id, parent_tool_call_id),
-            )
+        return save_parent_and_delete_subagent(parent_tool_call_id)
 
     def resolve_background_handler(
         tool_name: str,
@@ -199,24 +206,13 @@ async def run_session(
     save_checkpoint()
 
     if resumed:
-        # 发现旧的，已经完成的subagent非后台调用就删掉checkpoint
-        for resolved_tool_call_id in resolved_foreground_subagent_call_ids(
-            state.messages
-        ):
-            store.delete_checkpoint(
-                session_id,
-                subagent_id_for(session_id, resolved_tool_call_id),
-            )
-        for restored_task in BACKGROUND_MANAGER.snapshot():
-            if restored_task.status != "running":
-                background_completed(restored_task)
         # 启动所有未完成的后台任务
         BACKGROUND_MANAGER.resume_running_tasks(resolve_background_handler)
         replayed_tools: bool = await recover_pending_tool_calls(
             state,
             session_id,
             save_checkpoint,
-            cleanup_completed_subagent,
+            save_completed_foreground_subagent,
         )
         last_role: Optional[str] = (
             str(state.messages[-1].get("role")) if state.messages else None
@@ -227,7 +223,7 @@ async def run_session(
                 compact_state,
                 session_id,
                 save_checkpoint,
-                cleanup_completed_subagent,
+                save_completed_foreground_subagent,
             )
         recovered_answer: Optional[str] = _final_answer(state.messages)
         if recovered_answer is not None and pending_visible_response:
@@ -270,7 +266,7 @@ async def run_session(
                     compact_state,
                     session_id,
                     save_checkpoint,
-                    cleanup_completed_subagent,
+                    save_completed_foreground_subagent,
                 )
                 answer: Optional[str] = _final_answer(state.messages)
                 if answer is None:
@@ -295,7 +291,7 @@ async def run_session(
             compact_state,
             session_id,
             save_checkpoint,
-            cleanup_completed_subagent,
+            save_completed_foreground_subagent,
         )
     )
     try:

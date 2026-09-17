@@ -1,6 +1,7 @@
 import contextlib
 import io
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 from typing import Any, Dict
@@ -11,13 +12,11 @@ from unittest.mock import patch
 SRC_DIR: Path = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
 
-from checkpoint import (  # noqa: E402
-    pending_tool_calls,
-    resolved_foreground_subagent_call_ids,
-)
+from checkpoint import pending_tool_calls  # noqa: E402
 from main import main  # noqa: E402
 from persistence import (  # noqa: E402
     CHECKPOINT_VERSION,
+    CheckpointRecord,
     PersistenceStore,
     one_line_message,
     set_persistence_store,
@@ -91,6 +90,98 @@ class PersistenceStoreTests(unittest.TestCase):
         self.assertIsNotNone(record)
         assert record is not None
         self.assertEqual(second_payload, record.payload)
+
+    def test_parent_checkpoint_update_and_child_deletion_are_committed_together(
+        self,
+    ) -> None:
+        child_agent_id: str = subagent_id_for(self.session_id, "call_child")
+        child_payload: Dict[str, Any] = {
+            "version": CHECKPOINT_VERSION,
+            "context": {"messages": []},
+        }
+        parent_payload: Dict[str, Any] = checkpoint_payload(
+            [{"role": "tool", "tool_call_id": "call_child", "content": "done"}]
+        )
+        self.store.save_checkpoint(
+            self.session_id,
+            child_agent_id,
+            "subagent",
+            child_payload,
+        )
+
+        self.store.save_parent_checkpoint_and_delete_child(
+            self.session_id,
+            self.session_id,
+            "main",
+            parent_payload,
+            child_agent_id,
+        )
+
+        parent_record: CheckpointRecord | None = self.store.load_checkpoint(
+            self.session_id,
+            self.session_id,
+        )
+        self.assertIsNotNone(parent_record)
+        assert parent_record is not None
+        self.assertEqual(parent_payload, parent_record.payload)
+        self.assertIsNone(self.store.load_checkpoint(self.session_id, child_agent_id))
+
+    def test_parent_and_child_checkpoint_transaction_rolls_back_together(self) -> None:
+        child_agent_id: str = subagent_id_for(self.session_id, "call_child")
+        old_parent_payload: Dict[str, Any] = checkpoint_payload(
+            [{"role": "assistant", "content": "old"}]
+        )
+        child_payload: Dict[str, Any] = {
+            "version": CHECKPOINT_VERSION,
+            "context": {"messages": []},
+        }
+        new_parent_payload: Dict[str, Any] = checkpoint_payload(
+            [{"role": "tool", "tool_call_id": "call_child", "content": "done"}]
+        )
+        self.store.save_checkpoint(
+            self.session_id,
+            self.session_id,
+            "main",
+            old_parent_payload,
+        )
+        self.store.save_checkpoint(
+            self.session_id,
+            child_agent_id,
+            "subagent",
+            child_payload,
+        )
+        connection: sqlite3.Connection = sqlite3.connect(self.store.db_path)
+        with contextlib.closing(connection), connection:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_child_checkpoint_delete
+                BEFORE DELETE ON checkpoint
+                WHEN OLD.agent_id = 'subagent:session_test:call_child'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced rollback');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.save_parent_checkpoint_and_delete_child(
+                self.session_id,
+                self.session_id,
+                "main",
+                new_parent_payload,
+                child_agent_id,
+            )
+
+        parent_record: CheckpointRecord | None = self.store.load_checkpoint(
+            self.session_id,
+            self.session_id,
+        )
+        self.assertIsNotNone(parent_record)
+        assert parent_record is not None
+        self.assertEqual(old_parent_payload, parent_record.payload)
+        self.assertIsNotNone(
+            self.store.load_checkpoint(self.session_id, child_agent_id)
+        )
 
     def test_final_answer_is_not_duplicated(self) -> None:
         payload: Dict[str, Any] = checkpoint_payload([])
@@ -299,46 +390,6 @@ class CheckpointHelpersTests(unittest.TestCase):
         second_id: str = subagent_id_for("session_x", "call_y")
         self.assertEqual(first_id, second_id)
         self.assertEqual("subagent:session_x:call_y", first_id)
-
-    def test_resolved_foreground_subagent_is_identified_for_cleanup(self) -> None:
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_foreground",
-                        "type": "function",
-                        "function": {
-                            "name": "subagent",
-                            "arguments": '{"prompt":"work"}',
-                        },
-                    },
-                    {
-                        "id": "call_background",
-                        "type": "function",
-                        "function": {
-                            "name": "subagent",
-                            "arguments": '{"prompt":"work","run_in_background":true}',
-                        },
-                    },
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call_foreground",
-                "content": "done",
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call_background",
-                "content": "started",
-            },
-        ]
-        self.assertEqual(
-            ["call_foreground"],
-            resolved_foreground_subagent_call_ids(messages),
-        )
 
     def test_multiline_visible_message_is_one_physical_line(self) -> None:
         rendered: str = one_line_message("one\ntwo\\three\r")

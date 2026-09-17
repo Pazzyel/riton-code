@@ -1,7 +1,6 @@
 from typing import Any, Callable, Dict, List, Optional
 import asyncio
 import logging
-import uuid
 
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -270,23 +269,3 @@ async def run_subagent_tool(
 
     agent_compact_states.pop(subagent_id, None)
     return _summary(subagent.messages)
-
-
-async def run_subagent(
-    prompt: str,
-    tools: List[Dict[str, Any]] = CHILDREN_TOOLS,
-    handlers: Dict[str, Callable] = TOOL_HANDLERS,
-    max_turns: int = SUBAGENT_DEFAULT_MAX_TURNS,
-) -> str:
-    store: PersistenceStore = get_persistence_store()
-    session_id: str = f"session_{uuid.uuid4().hex}"
-    tool_call_id: str = f"direct_{uuid.uuid4().hex}"
-    store.create_session(session_id)
-    return await run_subagent_tool(
-        prompt,
-        session_id,
-        tool_call_id,
-        tools,
-        handlers,
-        max_turns,
-    )

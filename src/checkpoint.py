@@ -1,5 +1,4 @@
 from typing import Any, Dict, List
-import json
 
 from background import RuntimeTaskRecord
 from compact import CompactState
@@ -92,53 +91,3 @@ def pending_tool_calls(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if tool_call_id not in resolved_ids:
             pending.append(tool_call)
     return pending
-
-
-def resolved_foreground_subagent_call_ids(
-    messages: List[Dict[str, Any]],
-) -> List[str]:
-    """Find completed foreground subagent calls whose child checkpoints are safe to delete.
-
-    A subagent result is durable only when the parent conversation contains a terminal
-    tool message with the same ``tool_call_id``. Hook messages do not count as terminal
-    results. Background subagent calls are intentionally excluded because their parent
-    tool message is only a scheduling acknowledgement; their child checkpoint is deleted
-    by the background completion callback after the real result is persisted.
-    """
-    # Collect tool calls for which the parent conversation already has a final result.
-    terminal_ids: set[str] = set() # 已经有结果的tool，包含所有的tool结果
-    for message in messages:
-        if message.get("role") != "tool":
-            continue
-        content: str = str(message.get("content", ""))
-        tool_call_id: Any = message.get("tool_call_id")
-        if not content.startswith("[Hook message]:") and isinstance(tool_call_id, str):
-            terminal_ids.add(tool_call_id)
-
-    resolved_ids: List[str] = []
-    for message in messages:
-        if message.get("role") != "assistant":
-            continue
-        tool_calls: Any = message.get("tool_calls", [])
-        if not isinstance(tool_calls, list):
-            raise ValueError("Checkpoint assistant tool_calls must be a list")
-        for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                raise ValueError("Checkpoint tool call must be an object")
-            tool_call_id: Any = tool_call.get("id")
-            function: Any = tool_call.get("function")
-            if not isinstance(tool_call_id, str) or not isinstance(function, dict):
-                raise ValueError("Checkpoint tool call is incomplete")
-            if function.get("name") != "subagent" or tool_call_id not in terminal_ids:
-                continue # 不是subagent或者subagent还没有结果的都排除
-            arguments: Any = function.get("arguments", "{}")
-            if not isinstance(arguments, str):
-                raise ValueError("Checkpoint tool call arguments must be JSON text")
-            tool_input: Any = json.loads(arguments)
-            if not isinstance(tool_input, dict):
-                raise ValueError("Checkpoint tool call arguments must be an object")
-            # Only foreground results prove that the subagent invocation itself finished.
-            if tool_input.get("run_in_background") is not True:
-                resolved_ids.append(tool_call_id)
-    # 只有已经解决的subagent才会删掉checkpoint
-    return resolved_ids

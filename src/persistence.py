@@ -237,6 +237,31 @@ class PersistenceStore:
             )
         return True
 
+    def save_parent_checkpoint_and_delete_child(
+        self,
+        session_id: str,
+        parent_agent_id: str,
+        parent_agent_type: str,
+        parent_payload: Dict[str, Any],
+        child_agent_id: str,
+    ) -> None:
+        """Atomically persist a resolved parent state and remove its child state."""
+        timestamp: str = utc_now()
+        payload_text: str = json.dumps(parent_payload, ensure_ascii=False)
+        with closing(self._connect()) as connection, connection:
+            self._upsert_checkpoint(
+                connection,
+                session_id,
+                parent_agent_id,
+                parent_agent_type,
+                payload_text,
+                timestamp,
+            )
+            connection.execute(
+                "DELETE FROM checkpoint WHERE session_id = ? AND agent_id = ?",
+                (session_id, child_agent_id),
+            )
+
     def load_checkpoint(self, session_id: str, agent_id: str) -> Optional[CheckpointRecord]:
         with closing(self._connect()) as connection, connection:
             row: Optional[sqlite3.Row] = connection.execute(
@@ -265,13 +290,6 @@ class PersistenceStore:
             payload=payload,
             updated_at=row["updated_at"],
         )
-
-    def delete_checkpoint(self, session_id: str, agent_id: str) -> None:
-        with closing(self._connect()) as connection, connection:
-            connection.execute(
-                "DELETE FROM checkpoint WHERE session_id = ? AND agent_id = ?",
-                (session_id, agent_id),
-            )
 
     @staticmethod
     def _upsert_checkpoint(
