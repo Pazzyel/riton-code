@@ -88,9 +88,26 @@ model:
 
 ### 基本交互
 ```bash
-python src/agent_loop.py
+python src/main.py
 >> 读取当前的项目，分析项目现有的功能，并在项目根目录下添加README.md介绍项目
 ```
+
+### 会话持久化与恢复
+
+会话、可见问答和最新 checkpoint 保存在 `.riton/db/agent.db`。无参数启动会创建并打印新的 `session_id`：
+
+```bash
+python src/main.py
+```
+
+继续旧会话或列出全部会话：
+
+```bash
+python src/main.py -s session_0123456789abcdef
+python src/main.py -l
+```
+
+恢复会话时，程序会先恢复未完成的后台任务和工具调用，再逐行打印 `user`/`assistant` 历史并等待输入。后台任务和缺少结果的工具调用采用至少执行一次语义。
 
 ### 权限管理使用
 系统会自动在需要时请求权限确认：
@@ -120,10 +137,17 @@ Allow? (y/n/always): y
 ### 运行调试
 ```bash
 # 启用调试日志
-python src/agent_loop.py --debug
+python src/main.py --debug
 
 # 正常运行
-python src/agent_loop.py
+python src/main.py
+```
+
+Windows 上建议先创建虚拟环境并直接调用 Python；`start.sh` 面向 Linux：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe src\main.py -l
 ```
 
 ### 添加新技能

@@ -2,6 +2,8 @@ from pathlib import Path
 
 WORKDIR: Path = Path.cwd()
 CONFIG_DIR: Path = WORKDIR / ".riton"
+DB_DIR: Path = CONFIG_DIR / "db"
+DB_PATH: Path = DB_DIR / "agent.db"
 SKILL_DIR: Path = CONFIG_DIR / "skills"
 TRANSCRIPT_DIR: Path = CONFIG_DIR / ".transcripts"
 TOOL_RESULTS_DIR: Path = CONFIG_DIR / ".task_outputs" / "tool-results"

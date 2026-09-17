@@ -3,7 +3,6 @@ from typing_extensions import Literal
 
 from pydantic import BaseModel
 import aiofiles
-import aiopath
 from pathlib import Path
 
 from directory import TASKS_DIR
@@ -41,7 +40,7 @@ class TaskManager:
     async def _save(self, task: Task) -> None:
         """Save a task to the task directory."""
         task_path: Path = self.task_dir / f"task_{task.id}.json"
-        async with aiofiles.open(task_path, "w") as f:
+        async with aiofiles.open(task_path, "w", encoding="utf-8") as f:
             await f.write(task.model_dump_json())
 
     async def create(self, subject: str, description: str = "", owner: str = "") -> str:
@@ -58,8 +57,8 @@ class TaskManager:
     async def _load(self, task_id: int) -> Task:
         """Load a task from the task directory."""
         task_path: Path = self.task_dir / f"task_{task_id}.json"
-        async with aiofiles.open(task_path, "r") as f:
-            data = await f.read()
+        async with aiofiles.open(task_path, "r", encoding="utf-8") as f:
+            data: str = await f.read()
             return Task.model_validate_json(data)
         
     async def get(self, task_id: int) -> str:
@@ -72,10 +71,10 @@ class TaskManager:
         
         This will remove the task from the blocked_by list of any tasks that depend on it
         """
-        async for f in aiopath.AsyncPath(self.task_dir).glob("task_*.json"):
-            async with aiofiles.open(f, "r") as file:
-                data = await file.read()
-                task = Task.model_validate_json(data)
+        for f in self.task_dir.glob("task_*.json"):
+            async with aiofiles.open(f, "r", encoding="utf-8") as file:
+                data: str = await file.read()
+                task: Task = Task.model_validate_json(data)
                 if task_id in task.blocked_by:
                     task.blocked_by.remove(task_id)
                     await self._save(task)
@@ -88,7 +87,7 @@ class TaskManager:
                                   add_blocks: Optional[List[int]] = None
                                 ) -> str:
         """Update the dependencies of a task."""
-        task = await self._load(task_id)
+        task: Task = await self._load(task_id)
         if status is not None:
             task.status = status
             if status == "completed":
@@ -105,9 +104,9 @@ class TaskManager:
     async def list_all(self) -> str:
         """List all tasks in the task directory."""
         tasks: List[Task] = []
-        async for f in aiopath.AsyncPath(self.task_dir).glob("task_*.json"):
-            async with aiofiles.open(f, "r") as file:
-                data = await file.read()
+        for f in self.task_dir.glob("task_*.json"):
+            async with aiofiles.open(f, "r", encoding="utf-8") as file:
+                data: str = await file.read()
                 tasks.append(Task.model_validate_json(data))
         if not tasks:
             return "No tasks found."

@@ -1,67 +1,346 @@
+from __future__ import annotations
+
 import argparse
-import logging
 import asyncio
+import logging
+import sys
+from threading import RLock
+from typing import Any, Callable, Dict, List, Optional
+import uuid
 
-from agent_loop import LoopState, agent_loop, queue_processor_loop, agent_lock
-from compact import CompactState, agent_compact_states
-from hook import HookEvent, HookPayload, HookResponse, hook_manager
-from cron import cron_schedule_loop
+from persistence import (
+    CheckpointRecord,
+    MessageRecord,
+    PersistenceStore,
+    SessionRecord,
+    get_persistence_store,
+    one_line_message,
+    set_persistence_store,
+)
 
-MAIN_AGENT_ID: str = "agent_main"
 
-async def input_loop(state: LoopState, compact_state: CompactState, agent_id: str):
-    """Asynchronous input loop to read user input and feed it into the agent loop."""
-    while True:
-        query: str = await asyncio.get_event_loop().run_in_executor(None, input, ">> ")
-        if query.strip().lower() == "exit":
-            break
+logger = logging.getLogger(__name__)
 
-        async with agent_lock:
-            state.messages.append({
-                "role": "user",
-                "content": query,
-            })
-            await agent_loop(state, compact_state, agent_id)
-            print(state.messages[-1]["content"])
 
-async def loops(state: LoopState, compact_state: CompactState, agent_id: str):
-    # 包含输入线程，定时器检查线程，和cron队列处理线程
-    await asyncio.gather(
-        cron_schedule_loop(),
-        queue_processor_loop(state, compact_state, agent_id),
-        input_loop(state, compact_state, agent_id)
+def build_parser() -> argparse.ArgumentParser:
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        description="Run the coding agent loop."
     )
+    session_group: argparse._MutuallyExclusiveGroup = parser.add_mutually_exclusive_group()
+    session_group.add_argument(
+        "-s",
+        "--session",
+        dest="session_id",
+        help="Continue an existing session.",
+    )
+    session_group.add_argument(
+        "-l",
+        "--list-sessions",
+        action="store_true",
+        help="List sessions ordered by their last visible conversation time.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging output.",
+    )
+    return parser
+
+
+def print_sessions(store: PersistenceStore) -> None:
+    sessions: List[SessionRecord] = store.list_sessions()
+    for session in sessions:
+        print(f"{session.session_id} {session.updated_at}")
+
+
+def print_history(store: PersistenceStore, session_id: str) -> None:
+    messages: List[MessageRecord] = store.list_messages(session_id)
+    for message in messages:
+        print(f"{message.role}: {one_line_message(message.content)}")
+
+
+def _final_answer(messages: List[Dict[str, Any]]) -> Optional[str]:
+    if not messages:
+        return None
+    last_message: Dict[str, Any] = messages[-1]
+    if last_message.get("role") != "assistant" or last_message.get("tool_calls"):
+        return None
+    content: Any = last_message.get("content")
+    return str(content) if content is not None else ""
+
+
+async def run_session(
+    store: PersistenceStore,
+    session_id: str,
+    resumed: bool,
+) -> None:
+    # Runtime imports intentionally stay below the -l fast path so listing sessions
+    # does not initialize the model client or require an API key.
+    from agent_loop import (
+        LoopState,
+        PARENT_TOOL_HANDLERS,
+        agent_lock,
+        agent_loop,
+        queue_processor_loop,
+        recover_pending_tool_calls,
+    )
+    from background import BACKGROUND_MANAGER, RuntimeTaskRecord
+    from checkpoint import (
+        build_main_checkpoint,
+        resolved_foreground_subagent_call_ids,
+        subagent_id_for,
+    )
+    from compact import CompactState, agent_compact_states
+    from cron import cron_schedule_loop
+    from hook import HookEvent, HookPayload, HookResponse, hook_manager
+    from tools import TOOL_HANDLERS
+
+    checkpoint_record: Optional[CheckpointRecord] = store.load_checkpoint(
+        session_id,
+        session_id,
+    )
+    if resumed:
+        # 继续上次的对话
+        if checkpoint_record is None:
+            raise ValueError(f"Session {session_id} has no checkpoint")
+        if checkpoint_record.agent_type != "main":
+            raise ValueError(f"Session {session_id} checkpoint is not a main checkpoint")
+        loop_payload: Any = checkpoint_record.payload.get("loop_state")
+        compact_payload: Any = checkpoint_record.payload.get("compact_state")
+        background_payload: Any = checkpoint_record.payload.get("background_tasks")
+        if (
+            not isinstance(loop_payload, dict)
+            or not isinstance(compact_payload, dict)
+            or not isinstance(background_payload, list)
+        ):
+            raise ValueError(f"Session {session_id} checkpoint is incomplete")
+        messages: Any = loop_payload.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError(f"Session {session_id} checkpoint messages are invalid")
+        state: LoopState = LoopState(
+            messages=messages,
+            turn_count=int(loop_payload.get("turn_count", 0)),
+            transition_reason=loop_payload.get("transition_reason"),
+        )
+        compact_state: CompactState = CompactState.model_validate(compact_payload)
+        pending_visible_response: bool = bool(
+            checkpoint_record.payload.get("pending_visible_response", False)
+        )
+        background_tasks: List[RuntimeTaskRecord] = [
+            RuntimeTaskRecord.model_validate(task) for task in background_payload
+        ]
+        BACKGROUND_MANAGER.restore(background_tasks)
+    else:
+        # 新对话
+        state = LoopState(messages=[], turn_count=0, transition_reason=None)
+        compact_state = CompactState()
+        pending_visible_response = False
+        start_response: HookResponse = await hook_manager.run_hooks(
+            HookEvent(name="SessionStart", payload=HookPayload())
+        )
+        for hook_message in start_response.messages:
+            state.messages.append(
+                {
+                    "role": "system",
+                    "content": f"[Hook message]: {hook_message}",
+                }
+            )
+
+    agent_compact_states[session_id] = compact_state
+    checkpoint_lock: RLock = RLock()
+
+    def current_payload() -> Dict[str, Any]:
+        payload: Dict[str, Any] = build_main_checkpoint(
+            state.messages,
+            state.turn_count,
+            state.transition_reason,
+            compact_state,
+            BACKGROUND_MANAGER.snapshot(),
+            pending_visible_response,
+        )
+        return payload
+
+    def save_checkpoint() -> None:
+        with checkpoint_lock:
+            payload: Dict[str, Any] = current_payload()
+            store.save_checkpoint(session_id, session_id, "main", payload)
+
+    def cleanup_completed_subagent(tool_name: str, tool_input: Dict[str, Any]) -> None:
+        if tool_name != "subagent" or tool_input.get("run_in_background") is True:
+            return
+        parent_tool_call_id: Any = tool_input.get("tool_call_id")
+        if isinstance(parent_tool_call_id, str):
+            store.delete_checkpoint(
+                session_id,
+                subagent_id_for(session_id, parent_tool_call_id),
+            )
+
+    def background_completed(task: RuntimeTaskRecord) -> None:
+        """在后台任务完成后的回调，目前只有一种任务回调，就是subagent调用，回调是删掉它的checkpoint"""
+        if task.tool_name != "subagent":
+            return
+        parent_tool_call_id: Any = task.tool_input.get("tool_call_id")
+        if isinstance(parent_tool_call_id, str):
+            store.delete_checkpoint(
+                session_id,
+                subagent_id_for(session_id, parent_tool_call_id),
+            )
+
+    def resolve_background_handler(
+        tool_name: str,
+        owner_agent_id: str,
+    ) -> Optional[Callable]:
+        del owner_agent_id
+        if tool_name == "subagent":
+            return PARENT_TOOL_HANDLERS.get(tool_name)
+        return TOOL_HANDLERS.get(tool_name)
+
+    BACKGROUND_MANAGER.set_callbacks(save_checkpoint, background_completed)
+    save_checkpoint()
+
+    if resumed:
+        # 发现旧的，已经完成的subagent非后台调用就删掉checkpoint
+        for resolved_tool_call_id in resolved_foreground_subagent_call_ids(
+            state.messages
+        ):
+            store.delete_checkpoint(
+                session_id,
+                subagent_id_for(session_id, resolved_tool_call_id),
+            )
+        for restored_task in BACKGROUND_MANAGER.snapshot():
+            if restored_task.status != "running":
+                background_completed(restored_task)
+        # 启动所有未完成的后台任务
+        BACKGROUND_MANAGER.resume_running_tasks(resolve_background_handler)
+        replayed_tools: bool = await recover_pending_tool_calls(
+            state,
+            session_id,
+            save_checkpoint,
+            cleanup_completed_subagent,
+        )
+        last_role: Optional[str] = (
+            str(state.messages[-1].get("role")) if state.messages else None
+        )
+        if replayed_tools or last_role in {"user", "tool"}:
+            await agent_loop(
+                state,
+                compact_state,
+                session_id,
+                save_checkpoint,
+                cleanup_completed_subagent,
+            )
+        recovered_answer: Optional[str] = _final_answer(state.messages)
+        if recovered_answer is not None and pending_visible_response:
+            pending_visible_response = False
+            store.save_visible_message_and_checkpoint(
+                session_id,
+                "assistant",
+                recovered_answer,
+                session_id,
+                "main",
+                current_payload(),
+                only_if_last_user=True,
+            )
+
+    print_history(store, session_id)
+
+    async def input_loop() -> None:
+        nonlocal pending_visible_response
+        while True:
+            query: str = await asyncio.get_running_loop().run_in_executor(
+                None,
+                input,
+                ">> ",
+            )
+            if query.strip().lower() == "exit":
+                break
+            async with agent_lock:
+                state.messages.append({"role": "user", "content": query})
+                pending_visible_response = True
+                store.save_visible_message_and_checkpoint(
+                    session_id,
+                    "user",
+                    query,
+                    session_id,
+                    "main",
+                    current_payload(),
+                )
+                await agent_loop(
+                    state,
+                    compact_state,
+                    session_id,
+                    save_checkpoint,
+                    cleanup_completed_subagent,
+                )
+                answer: Optional[str] = _final_answer(state.messages)
+                if answer is None:
+                    logger.warning("Agent loop ended without a final assistant answer")
+                    continue
+                pending_visible_response = False
+                store.save_visible_message_and_checkpoint(
+                    session_id,
+                    "assistant",
+                    answer,
+                    session_id,
+                    "main",
+                    current_payload(),
+                    only_if_last_user=True,
+                )
+                print(answer)
+
+    cron_task: asyncio.Task[None] = asyncio.create_task(cron_schedule_loop())
+    queue_task: asyncio.Task[None] = asyncio.create_task(
+        queue_processor_loop(
+            state,
+            compact_state,
+            session_id,
+            save_checkpoint,
+            cleanup_completed_subagent,
+        )
+    )
+    try:
+        await input_loop()
+    finally:
+        cron_task.cancel()
+        queue_task.cancel()
+        await asyncio.gather(cron_task, queue_task, return_exceptions=True)
+        save_checkpoint()
+        BACKGROUND_MANAGER.set_callbacks(None)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser: argparse.ArgumentParser = build_parser()
+    args: argparse.Namespace = parser.parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        force=True,
+    )
+    store: PersistenceStore = get_persistence_store()
+    set_persistence_store(store)
+
+    if args.list_sessions:
+        print_sessions(store)
+        return 0
+
+    resumed: bool = args.session_id is not None
+    if resumed:
+        session_id: str = str(args.session_id)
+        if not store.session_exists(session_id):
+            print(f"Session not found: {session_id}", file=sys.stderr)
+            return 2
+    else:
+        session_id = f"session_{uuid.uuid4().hex}"
+        store.create_session(session_id)
+        print(f"session_id: {session_id}")
+
+    try:
+        asyncio.run(run_session(store, session_id, resumed))
+    except (ValueError, TypeError) as exc:
+        logger.error("Unable to start session: %s", str(exc))
+        return 2
+    return 0
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the coding agent loop.")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging output")
-    args = parser.parse_args()
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO, 
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s", 
-        force=True
-    )
-
-    logger = logging.getLogger(__name__)
-
-    logger.debug("Debug logging enabled")
-
-    state: LoopState = LoopState(
-        messages=[],
-        turn_count=0,
-        transition_reason=None,
-    )
-    compact_state: CompactState = CompactState()
-    agent_compact_states[MAIN_AGENT_ID] = compact_state
-
-    # Hook result was ignored
-    start_response: HookResponse = asyncio.run(hook_manager.run_hooks(HookEvent(name="SessionStart", payload=HookPayload())))
-    for msg in start_response.messages:
-        state.messages.append({
-            "role": "system",
-            "content": f"[Hook message]: {msg}",
-        })
-
-    asyncio.run(loops(state, compact_state, MAIN_AGENT_ID))
-
+    raise SystemExit(main())

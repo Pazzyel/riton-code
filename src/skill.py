@@ -33,7 +33,7 @@ class SkillRegistry:
             logger.info(f"Skill directory {self.skill_dir} does not exist. No skills loaded.")
             return
         for skill_file in self.skill_dir.rglob("**/SKILL.md"):
-            with skill_file.open() as f:
+            with skill_file.open(encoding="utf-8") as f:
                 content: str = f.read()
                 meta, body = self._parse_frontmatter(content)
                 if "name" in meta:

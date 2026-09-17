@@ -1,6 +1,5 @@
 from typing import List, Dict, Optional, Any
 import logging
-import json
 import asyncio
 
 from openai.types.chat.chat_completion import ChatCompletion
@@ -8,23 +7,33 @@ from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 
 import config as config
-from tools import run_tool, TOOLS, TOOL_HANDLERS, SUBAGENT_TOOLS
-from subagent import run_subagent
+from tools import TOOLS, TOOL_HANDLERS, SUBAGENT_TOOLS
+from subagent import run_subagent_tool
 from todo import todo_manager
 from ai_config import client
 from prompt.system_prompt import system_prompt_builder
 from compact import CompactState, try_compact
-from hook import HookEvent, HookResponse, HookPayload, hook_manager
 from recovery import choose_recovery, RecoveryType, CONTINUE_MESSAGE, backoff_delay
 from background import BACKGROUND_MANAGER
 from cron import CRON_TRIGGER_INTERVAL, CronJob, cron_lock, cron_queue
+from checkpoint import pending_tool_calls
+from tool_execution import (
+    CheckpointCallback,
+    ToolCompletionCallback,
+    execute_tool_call,
+    recover_tool_call,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_TURNS: int = 20  # Maximum number of turns in the agent loop before stopping
 
 PARENT_TOOL_HANDLERS = TOOL_HANDLERS.copy()
-PARENT_TOOL_HANDLERS["subagent"] = lambda **kw: run_subagent(kw["prompt"])
+PARENT_TOOL_HANDLERS["subagent"] = lambda **kw: run_subagent_tool(
+    prompt=kw["prompt"],
+    agent_id=kw["agent_id"],
+    tool_call_id=kw["tool_call_id"],
+)
 PARENT_TOOLS = TOOLS + SUBAGENT_TOOLS
 
 class LoopState:
@@ -32,12 +41,18 @@ class LoopState:
     turn_count:         int                     # The number of turns taken in the loop
     transition_reason:  Optional[str]           # The reason for transitioning to the next turn, if applicable
 
-    def __init__(self, messages: List[Dict[str, str]], turn_count: int, transition_reason: Optional[str]):
+    def __init__(self, messages: List[Dict[str, Any]], turn_count: int, transition_reason: Optional[str]):
         self.messages = messages
         self.turn_count = turn_count
         self.transition_reason = transition_reason
 
-async def agent_loop(state: LoopState, compact_state: CompactState, agent_id: str) -> None:
+async def agent_loop(
+    state: LoopState,
+    compact_state: CompactState,
+    agent_id: str,
+    checkpoint_callback: Optional[CheckpointCallback] = None,
+    completion_callback: Optional[ToolCompletionCallback] = None,
+) -> None:
     """
     Run the agent loop until completion.
 
@@ -45,14 +60,38 @@ async def agent_loop(state: LoopState, compact_state: CompactState, agent_id: st
     """
 
     logger.debug("Starting agent loop")
+    # 开启loop先删持久化一次，保险
     state.messages = await try_compact(state.messages, compact_state)
-    while await run_one_loop(state, agent_id, compact_state) and state.turn_count < MAX_TURNS:
+    if checkpoint_callback is not None:
+        checkpoint_callback()
+    loop_count: int = 0
+    while loop_count < MAX_TURNS:
+        should_continue: bool = await run_one_loop(
+            state,
+            agent_id,
+            compact_state,
+            checkpoint_callback,
+            completion_callback,
+        )
+        loop_count += 1
+        if checkpoint_callback is not None:
+            checkpoint_callback()
+        if not should_continue:
+            break
         state.messages = await try_compact(state.messages, compact_state)
+        if checkpoint_callback is not None:
+            checkpoint_callback()
     
     logger.debug("Agent loop finished after %d turns", state.turn_count)
 
 retry_count = 0  # Initialize retry count for backoff strategy
-async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactState) -> bool:
+async def run_one_loop(
+    state: LoopState,
+    agent_id: str,
+    compact_state: CompactState,
+    checkpoint_callback: Optional[CheckpointCallback] = None,
+    completion_callback: Optional[ToolCompletionCallback] = None,
+) -> bool:
     """
     Run one loop of the agent's reasoning and acting process.
 
@@ -91,6 +130,7 @@ async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactSt
             logger.warning("Encountered transient error, backing off before retrying")
             await asyncio.sleep(backoff_delay(retry_count))  # Simple backoff strategy, can be improved with exponential backoff
             retry_count += 1
+            return True
         case "fail":
             retry_count = 0  # Reset retry count on unrecoverable error
             logger.error("Unrecoverable error encountered, stopping agent loop")
@@ -133,7 +173,10 @@ async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactSt
             }
             for call in valid_tool_calls
         ]
+    # 模型决定调用工具后持久化
     state.messages.append(assistant_payload)
+    if checkpoint_callback is not None:
+        checkpoint_callback()
 
     if len(valid_tool_calls) == 0:
         logger.debug("No tool calls requested by model, stopping loop")
@@ -141,50 +184,18 @@ async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactSt
         return False
     
     used_todo: bool = False
-    for call in valid_tool_calls:
-        tool_call = call["tool_call"]
-        # Skip custom tool
-        if not isinstance(tool_call, ChatCompletionMessageToolCall):
-            logger.warning("Received tool call that is not of type ChatCompletionMessageToolCall, skipping: %s", tool_call)
-            continue
-        tool_name = call["name"]
+    for call in assistant_payload["tool_calls"]:
+        tool_name: str = call["function"]["name"]
         if tool_name == "todo":
             used_todo = True
-        
-        # add PreToolCall hook here
-        pre_response: HookResponse = await hook_manager.run_hooks(HookEvent(name="PreToolCall", payload=HookPayload(tool_name=tool_name, tool_input=json.loads(tool_call.function.arguments))))
-        for msg in pre_response.messages:
-            state.messages.append({
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "content": f"[Hook message]: {msg}",
-            })
-        if pre_response.blocked:
-            state.messages.append({
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "content": f"[Tool call blocked by hook]: {pre_response.blocked_reason}",
-            })
-            continue
-
-        logger.debug("Executing tool call: %s", tool_name)
-        output: str = await run_tool(tool_call, PARENT_TOOL_HANDLERS, agent_id=agent_id)
-
-        # add PostToolCall hook here
-        post_response: HookResponse = await hook_manager.run_hooks(HookEvent(name="PostToolCall", payload=HookPayload(tool_name=tool_name, tool_input=json.loads(tool_call.function.arguments))))
-        for msg in post_response.messages:
-            state.messages.append({
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "content": f"[Hook message]: {msg}",
-            })
-        
-        # Real tool output should after post hook messages
-        state.messages.append({
-            "role": "tool",
-            "tool_call_id": call["id"],
-            "content": output,
-        })
+        await execute_tool_call(
+            state.messages,
+            call,
+            PARENT_TOOL_HANDLERS,
+            agent_id,
+            checkpoint_callback,
+            completion_callback,
+        )
 
 
     # Todo reminder should in the back of tool message
@@ -212,6 +223,40 @@ async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactSt
     return True
 
 
+async def recover_pending_tool_calls(
+    state: LoopState,
+    agent_id: str,
+    checkpoint_callback: Optional[CheckpointCallback] = None,
+    completion_callback: Optional[ToolCompletionCallback] = None,
+) -> bool:
+    """恢复已经保存的工具调用但未执行成功的结果"""
+    pending_calls: List[Dict[str, Any]] = pending_tool_calls(state.messages)
+    if not pending_calls:
+        return False
+    for tool_call in pending_calls:
+        await recover_tool_call(
+            state.messages,
+            tool_call,
+            PARENT_TOOL_HANDLERS,
+            agent_id,
+            checkpoint_callback,
+            completion_callback,
+        )
+    background_notifications: str = BACKGROUND_MANAGER.get_background_task_notification(agent_id)
+    if background_notifications.strip():
+        state.messages.append(
+            {
+                "role": "user",
+                "content": background_notifications,
+            }
+        )
+    state.turn_count += 1
+    state.transition_reason = "tool_call"
+    if checkpoint_callback is not None:
+        checkpoint_callback()
+    return True
+
+
 
 
 
@@ -221,7 +266,13 @@ async def run_one_loop(state: LoopState, agent_id: str, compact_state: CompactSt
 agent_lock: asyncio.Lock = asyncio.Lock()  # User input and cron job may race
 
 
-async def queue_processor_loop(state: LoopState, compact_state: CompactState, agent_id: str):
+async def queue_processor_loop(
+    state: LoopState,
+    compact_state: CompactState,
+    agent_id: str,
+    checkpoint_callback: Optional[CheckpointCallback] = None,
+    completion_callback: Optional[ToolCompletionCallback] = None,
+) -> None:
     while True:
         await asyncio.sleep(CRON_TRIGGER_INTERVAL)
         if not await has_cron_queue():
@@ -237,7 +288,15 @@ async def queue_processor_loop(state: LoopState, compact_state: CompactState, ag
                     "role": "user",
                     "content": f"[cron job {job.id}] {job.prompt}",
                 })
-            await agent_loop(state, compact_state, agent_id)
+            if checkpoint_callback is not None:
+                checkpoint_callback()
+            await agent_loop(
+                state,
+                compact_state,
+                agent_id,
+                checkpoint_callback,
+                completion_callback,
+            )
 
 async def has_cron_queue() -> bool:
     """Check if there are any jobs in the cron_queue."""

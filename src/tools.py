@@ -18,7 +18,7 @@ from compact import track_recent_files, agent_compact_states
 from permission.permission import permission_manager, PermissionResult
 from memory.memory import memory_manager
 from task import TASKS_MANAGER
-from background import BackgroundManager, BACKGROUND_MANAGER
+from background import BACKGROUND_MANAGER
 from cron import schedule_job, cancel_job, list_jobs, CronJob
 
 logger = logging.getLogger(__name__)
@@ -332,7 +332,7 @@ for tool in SUBAGENT_TOOLS:
 async def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict[str, Callable], agent_id: str) -> str:
     """Run a tool call using the provided handlers and return the output."""
     # TODO: Add support for more tools'
-    arguments: Dict[str, str] = json.loads(tool_call.function.arguments)
+    arguments: Dict[str, Any] = json.loads(tool_call.function.arguments)
     logger.debug("Dispatching tool '%s' with args: %s", tool_call.function.name, arguments)
 
     # Check permissions before running the tool
@@ -347,7 +347,11 @@ async def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict
 
     handler: Optional[Callable] = tool_handlers.get(tool_call.function.name)
     # For subagent tool calls, we want to track recent files accessed by the subagent for better compaction in the main agent
-    all_args: Dict[str, Any] = {**arguments, "agent_id": agent_id}
+    all_args: Dict[str, Any] = {
+        **arguments,
+        "agent_id": agent_id,
+        "tool_call_id": tool_call.id,
+    }
     if handler:
         try:
             # Handlers may be sync wrappers (e.g. lambdas) that return a coroutine.
@@ -355,8 +359,14 @@ async def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict
 
             # Background tool check
             if BACKGROUND_MANAGER.should_run_in_background(tool_call.function.name, all_args):
+                # 也可以不移除，因为lambda包装的函数接受任意参数
                 all_args.pop("run_in_background", None)
-                task_id: str = BACKGROUND_MANAGER.start_background_task(handler, all_args, agent_id)
+                task_id: str = BACKGROUND_MANAGER.start_background_task(
+                    handler,
+                    tool_call.function.name,
+                    all_args,
+                    agent_id,
+                )
                 result = f"[Background task {task_id} started]\nCommand: {arguments.get('command', '')}.\nResult will be available when complete in the <task_notifications> section of the user input."
             else:
                 all_args.pop("run_in_background", None)

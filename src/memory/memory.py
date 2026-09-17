@@ -39,7 +39,7 @@ class MemoryManager:
         The function only use in __init__ 
         """
         for memory_file in self.memory_dir.glob("*.md"):
-            with open(memory_file, "r") as f:
+            with open(memory_file, "r", encoding="utf-8") as f:
                 content: str = f.read()
                 memory: Optional[Memory] = self._parse_formatter(content)
                 if memory:
@@ -72,7 +72,7 @@ class MemoryManager:
         for line in header.splitlines():
             line = line.strip()
             if line.startswith("name:"):
-                name: str = line[len("name:"):].strip()
+                _name: str = line[len("name:"):].strip()
             elif line.startswith("description:"):
                 description: str = line[len("description:"):].strip()
             elif line.startswith("type:"):
@@ -118,7 +118,7 @@ class MemoryManager:
 
         print(memory_frontmatter)
 
-        async with aiofiles.open(file_path, "w") as f:
+        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
             await f.write(memory_frontmatter.strip())
 
         # also keep it in memory for quick access, we can load it from disk when the agent start
@@ -164,7 +164,7 @@ class MemoryManager:
             lines.append(f"- {name}: {memory.description} [{memory.type}]")
             if len(lines) >= MAX_INDEX_LINES:
                 break
-        async with aiofiles.open(MEMORY_INDEX, "w") as f:
+        async with aiofiles.open(MEMORY_INDEX, "w", encoding="utf-8") as f:
             await f.write("\n".join(lines) + "\n")
 
 memory_manager: MemoryManager = MemoryManager()
