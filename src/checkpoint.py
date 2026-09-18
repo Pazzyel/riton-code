@@ -2,6 +2,7 @@ from typing import Any, Dict, List
 
 from background import RuntimeTaskRecord
 from compact import CompactState
+from notification import Notification
 from persistence import CHECKPOINT_VERSION
 
 
@@ -16,6 +17,7 @@ def build_main_checkpoint(
     compact_state: CompactState,
     background_tasks: List[RuntimeTaskRecord],
     pending_visible_response: bool,
+    pending_notifications: List[Notification] | None = None,
 ) -> Dict[str, Any]:
     """生成MainAgent的checkpoint"""
     payload: Dict[str, Any] = {
@@ -28,6 +30,10 @@ def build_main_checkpoint(
         "compact_state": compact_state.model_dump(),
         "background_tasks": [task.model_dump() for task in background_tasks],
         "pending_visible_response": pending_visible_response,
+        "pending_notifications": [
+            notification.model_dump()
+            for notification in (pending_notifications or [])
+        ],
     }
     return payload
 

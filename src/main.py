@@ -61,16 +61,6 @@ def print_history(store: PersistenceStore, session_id: str) -> None:
         print(f"{message.role}: {one_line_message(message.content)}")
 
 
-def _final_answer(messages: List[Dict[str, Any]]) -> Optional[str]:
-    if not messages:
-        return None
-    last_message: Dict[str, Any] = messages[-1]
-    if last_message.get("role") != "assistant" or last_message.get("tool_calls"):
-        return None
-    content: Any = last_message.get("content")
-    return str(content) if content is not None else ""
-
-
 async def run_session(
     store: PersistenceStore,
     session_id: str,
@@ -83,14 +73,20 @@ async def run_session(
         PARENT_TOOL_HANDLERS,
         agent_lock,
         agent_loop,
-        queue_processor_loop,
+        final_answer,
+        notification_processor_loop,
         recover_pending_tool_calls,
     )
-    from background import BACKGROUND_MANAGER, RuntimeTaskRecord
+    from background import (
+        BACKGROUND_MANAGER,
+        RuntimeTaskRecord,
+        format_background_task_notification,
+    )
     from checkpoint import build_main_checkpoint, subagent_id_for
     from compact import CompactState, agent_compact_states
     from cron import cron_schedule_loop
     from hook import HookEvent, HookPayload, HookResponse, hook_manager
+    from notification import NOTIFICATION_QUEUE, Notification
     from tools import TOOL_HANDLERS
 
     checkpoint_record: Optional[CheckpointRecord] = store.load_checkpoint(
@@ -106,10 +102,15 @@ async def run_session(
         loop_payload: Any = checkpoint_record.payload.get("loop_state")
         compact_payload: Any = checkpoint_record.payload.get("compact_state")
         background_payload: Any = checkpoint_record.payload.get("background_tasks")
+        notification_payload: Any = checkpoint_record.payload.get(
+            "pending_notifications",
+            [],
+        )
         if (
             not isinstance(loop_payload, dict)
             or not isinstance(compact_payload, dict)
             or not isinstance(background_payload, list)
+            or not isinstance(notification_payload, list)
         ):
             raise ValueError(f"Session {session_id} checkpoint is incomplete")
         messages: Any = loop_payload.get("messages")
@@ -128,11 +129,16 @@ async def run_session(
             RuntimeTaskRecord.model_validate(task) for task in background_payload
         ]
         BACKGROUND_MANAGER.restore(background_tasks)
+        NOTIFICATION_QUEUE.restore(
+            Notification.model_validate(item) for item in notification_payload
+        )
     else:
         # 新对话
         state = LoopState(messages=[], turn_count=0, transition_reason=None)
         compact_state = CompactState()
         pending_visible_response = False
+        BACKGROUND_MANAGER.restore([])
+        NOTIFICATION_QUEUE.restore([])
         start_response: HookResponse = await hook_manager.run_hooks(
             HookEvent(name="SessionStart", payload=HookPayload())
         )
@@ -146,6 +152,7 @@ async def run_session(
 
     agent_compact_states[session_id] = compact_state
     checkpoint_lock: RLock = RLock()
+    event_loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
 
     def current_payload() -> Dict[str, Any]:
         payload: Dict[str, Any] = build_main_checkpoint(
@@ -155,6 +162,7 @@ async def run_session(
             compact_state,
             BACKGROUND_MANAGER.snapshot(),
             pending_visible_response,
+            NOTIFICATION_QUEUE.snapshot(),
         )
         return payload
 
@@ -186,12 +194,41 @@ async def run_session(
         parent_tool_call_id: Any = tool_input.get("tool_call_id")
         return save_parent_and_delete_subagent(parent_tool_call_id)
 
+    def publish_notification(notification: Notification) -> bool:
+        published: bool = NOTIFICATION_QUEUE.publish(notification)
+        # Persist even on a duplicate retry so a previous failed save can recover.
+        save_checkpoint()
+        return published
+
+    def notification_for_background_task(task: RuntimeTaskRecord) -> Notification:
+        return Notification(
+            id=f"background:{task.id}",
+            content=format_background_task_notification([task]),
+        )
+
+    def commit_background_completion(task: RuntimeTaskRecord) -> None:
+        """Commit a worker result on the main event loop."""
+        if task.agent_id != session_id:
+            # Subagent-owned tasks retain their existing polling behavior.
+            save_checkpoint()
+            return
+        removed_task: Optional[RuntimeTaskRecord] = BACKGROUND_MANAGER.remove_task(task.id)
+        if removed_task is None:
+            return
+        NOTIFICATION_QUEUE.publish(notification_for_background_task(removed_task))
+        if removed_task.tool_name == "subagent":
+            parent_tool_call_id: Any = removed_task.tool_input.get("tool_call_id")
+            if save_parent_and_delete_subagent(parent_tool_call_id):
+                return
+        save_checkpoint()
+
     def background_completed(task: RuntimeTaskRecord) -> bool:
-        """后台 subagent 完成时，原子保存父状态并删除子 checkpoint。"""
-        if task.tool_name != "subagent":
+        """Move completion handling from a worker thread to the main event loop."""
+        try:
+            event_loop.call_soon_threadsafe(commit_background_completion, task)
+        except RuntimeError:
             return False
-        parent_tool_call_id: Any = task.tool_input.get("tool_call_id")
-        return save_parent_and_delete_subagent(parent_tool_call_id)
+        return True
 
     def resolve_background_handler(
         tool_name: str,
@@ -214,6 +251,23 @@ async def run_session(
             save_checkpoint,
             save_completed_foreground_subagent,
         )
+        completed_tasks: List[RuntimeTaskRecord] = BACKGROUND_MANAGER.pop_completed_tasks(
+            session_id
+        )
+        completed_subagent_calls: List[Any] = []
+        for task in completed_tasks:
+            NOTIFICATION_QUEUE.publish(notification_for_background_task(task))
+            if task.tool_name == "subagent":
+                completed_subagent_calls.append(task.tool_input.get("tool_call_id"))
+        if completed_tasks:
+            saved_with_child_cleanup: bool = False
+            for parent_tool_call_id in completed_subagent_calls:
+                saved_with_child_cleanup = (
+                    save_parent_and_delete_subagent(parent_tool_call_id)
+                    or saved_with_child_cleanup
+                )
+            if not saved_with_child_cleanup:
+                save_checkpoint()
         last_role: Optional[str] = (
             str(state.messages[-1].get("role")) if state.messages else None
         )
@@ -225,7 +279,7 @@ async def run_session(
                 save_checkpoint,
                 save_completed_foreground_subagent,
             )
-        recovered_answer: Optional[str] = _final_answer(state.messages)
+        recovered_answer: Optional[str] = final_answer(state.messages)
         if recovered_answer is not None and pending_visible_response:
             pending_visible_response = False
             store.save_visible_message_and_checkpoint(
@@ -239,6 +293,32 @@ async def run_session(
             )
 
     print_history(store, session_id)
+
+    def save_notification_batch(notifications: List[Notification]) -> None:
+        nonlocal pending_visible_response
+        pending_visible_response = True
+        store.save_visible_messages_and_checkpoint(
+            session_id,
+            [("user", notification.content) for notification in notifications],
+            session_id,
+            "main",
+            current_payload(),
+        )
+
+    def save_notification_answer(answer: str) -> None:
+        nonlocal pending_visible_response
+        pending_visible_response = False
+        saved: bool = store.save_visible_message_and_checkpoint(
+            session_id,
+            "assistant",
+            answer,
+            session_id,
+            "main",
+            current_payload(),
+            only_if_last_user=True,
+        )
+        if saved:
+            print(answer)
 
     async def input_loop() -> None:
         nonlocal pending_visible_response
@@ -268,7 +348,7 @@ async def run_session(
                     save_checkpoint,
                     save_completed_foreground_subagent,
                 )
-                answer: Optional[str] = _final_answer(state.messages)
+                answer: Optional[str] = final_answer(state.messages)
                 if answer is None:
                     logger.warning("Agent loop ended without a final assistant answer")
                     continue
@@ -284,12 +364,17 @@ async def run_session(
                 )
                 print(answer)
 
-    cron_task: asyncio.Task[None] = asyncio.create_task(cron_schedule_loop())
+    cron_task: asyncio.Task[None] = asyncio.create_task(
+        cron_schedule_loop(publish_notification)
+    )
     queue_task: asyncio.Task[None] = asyncio.create_task(
-        queue_processor_loop(
+        notification_processor_loop(
             state,
             compact_state,
             session_id,
+            NOTIFICATION_QUEUE,
+            save_notification_batch,
+            save_notification_answer,
             save_checkpoint,
             save_completed_foreground_subagent,
         )

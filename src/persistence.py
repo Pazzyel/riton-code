@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from directory import DB_PATH
 
@@ -157,14 +157,14 @@ class PersistenceStore:
         6. (Optional)消息压缩后
            try_compact 改变消息历史后保存新的完整状态。
         7. 后台任务状态变化时
-           后台任务创建和执行完成时都会触发主 checkpoint 保存，记录任务参数、状态及结果。
+           后台任务创建时保存；主 Agent 后台任务完成后转为待处理通知并保存。
         8. (Optional) 恢复未完成工具调用时
            每个重放工具完成后保存，全部重放结束、更新轮次状态后再保存一次，固定修复的结果
-        9. (Optional) Cron 消息注入后
-           在 cron prompt 加入主消息历史后、进入 agent loop 前保存。
+        9. (Optional) 通知入队或注入后
+           Cron/Background 通知进入可恢复队列时保存；注入消息历史后与可见消息一起保存。
         10. (Optional) AI 最终回答写入可见历史时
             最终回答和 checkpoint 在同一个 SQLite 事务中提交。
-        11. (Optional) 主程序正常退出输入循环时，取消 cron/queue 协程后再保存一次。
+        11. (Optional) 主程序正常退出输入循环时，取消 cron/notification 协程后再保存一次。
 
         子 agent 会在这些时机保存自己的 checkpoint：
         1. 创建或恢复 SubagentContext 后立即保存。
@@ -236,6 +236,43 @@ class PersistenceStore:
                 timestamp,
             )
         return True
+
+    def save_visible_messages_and_checkpoint(
+        self,
+        session_id: str,
+        messages: Sequence[Tuple[str, str]],
+        agent_id: str,
+        agent_type: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        """Atomically append an ordered message batch and update its checkpoint."""
+        for role, _ in messages:
+            if role not in {"user", "assistant"}:
+                raise ValueError(f"Unsupported visible message role: {role}")
+        timestamp: str = utc_now()
+        payload_text: str = json.dumps(payload, ensure_ascii=False)
+        with closing(self._connect()) as connection, connection:
+            connection.executemany(
+                "INSERT INTO message(session_id, role, content, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    (session_id, role, content, timestamp)
+                    for role, content in messages
+                ],
+            )
+            if messages:
+                connection.execute(
+                    "UPDATE session SET updated_at = ? WHERE session_id = ?",
+                    (timestamp, session_id),
+                )
+            self._upsert_checkpoint(
+                connection,
+                session_id,
+                agent_id,
+                agent_type,
+                payload_text,
+                timestamp,
+            )
 
     def save_parent_checkpoint_and_delete_child(
         self,

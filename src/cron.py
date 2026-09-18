@@ -1,9 +1,10 @@
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from typing import List, Dict
+from typing import Callable, List, Dict
 import asyncio, logging, json, aiofiles, random
 
 from directory import DURABLE_PATH
+from notification import Notification
 
 CRON_TRIGGER_INTERVAL = 1  # 每1秒检查一次cron任务
 
@@ -11,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 cron_lock = asyncio.Lock()
 scheduled_jobs: Dict[str, "CronJob"] = {}
-cron_queue: List["CronJob"] = []
 _last_fired: Dict[str, str] = {}  # 任务上次触发的时间，job_id -> last fired minute marker (YYYY-MM-DD HH:MM)
 
 @dataclass
@@ -160,8 +160,17 @@ def _cron_field_matches(field: str, value: int) -> bool:
         return int(lo) <= value <= int(hi)
     return value == int(field)
 
-async def cron_schedule_loop():
-    """定时检查任务，任务触发时投递到 cron_queue"""
+def build_cron_notification(job: CronJob, minute_marker: str) -> Notification:
+    return Notification(
+        id=f"cron:{job.id}:{minute_marker}",
+        content=f"[cron job {job.id}] {job.prompt}",
+    )
+
+
+async def cron_schedule_loop(
+    publish_notification: Callable[[Notification], bool],
+) -> None:
+    """定时检查任务，任务触发时投递到通用通知队列。"""
     while True:
         await asyncio.sleep(CRON_TRIGGER_INTERVAL)
         now: datetime = datetime.now()
@@ -171,7 +180,7 @@ async def cron_schedule_loop():
                 try:
                     if cron_matches(job.cron, now):
                         if _last_fired.get(job.id) != minute_marker:
-                            cron_queue.append(job)
+                            publish_notification(build_cron_notification(job, minute_marker))
                             _last_fired[job.id] = minute_marker
                             logger.info(f"[cron fire] {job.id} → {job.prompt[:40]}")
                         if not job.recurring:

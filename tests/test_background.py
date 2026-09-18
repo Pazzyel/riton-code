@@ -13,11 +13,30 @@ from background import (  # noqa: E402
     BACKGROUND_MANAGER,
     BackgroundManager,
     RuntimeTaskRecord,
+    format_background_task_notification,
 )
 from tool_execution import recover_tool_call  # noqa: E402
 
 
 class BackgroundRecoveryTests(unittest.TestCase):
+    def test_background_notification_preserves_existing_xml_format(self) -> None:
+        task: RuntimeTaskRecord = RuntimeTaskRecord(
+            id="bg_task_1",
+            agent_id="session_test",
+            tool_name="bash",
+            tool_input={},
+            command="build",
+            status="completed",
+            result_preview="success",
+        )
+
+        content: str = format_background_task_notification([task])
+
+        self.assertIn("<task_id>bg_task_1</task_id>", content)
+        self.assertIn("<status>completed</status>", content)
+        self.assertIn("<command>build</command>", content)
+        self.assertIn("<summary>success</summary>", content)
+
     def test_completion_callback_can_commit_without_duplicate_checkpoint(self) -> None:
         manager: BackgroundManager = BackgroundManager()
         completed: Event = Event()
@@ -124,6 +143,38 @@ class BackgroundRecoveryTests(unittest.TestCase):
 
 
 class BackgroundToolCallRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_background_task_is_restored_without_reexecution(self) -> None:
+        task: RuntimeTaskRecord = RuntimeTaskRecord(
+            id="bg_task_19",
+            agent_id="session_test",
+            tool_name="read_file",
+            tool_input={
+                "path": "README.md",
+                "agent_id": "session_test",
+                "tool_call_id": "call_19",
+            },
+            command="",
+            status="completed",
+            result="done",
+        )
+        BACKGROUND_MANAGER.restore([task])
+        messages: list[dict[str, object]] = []
+        tool_call: dict[str, object] = {
+            "id": "call_19",
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": '{"path":"README.md","run_in_background":true}',
+            },
+        }
+        try:
+            await recover_tool_call(messages, tool_call, {}, "session_test")
+            self.assertEqual("tool", messages[-1]["role"])
+            self.assertIn("restored", str(messages[-1]["content"]))
+            self.assertEqual(1, len(BACKGROUND_MANAGER.snapshot()))
+        finally:
+            BACKGROUND_MANAGER.restore([])
+
     async def test_existing_background_task_gets_result_injected_without_duplicate(self) -> None:
         task: RuntimeTaskRecord = RuntimeTaskRecord(
             id="bg_task_20",

@@ -26,20 +26,30 @@ class RuntimeTaskRecord(BaseModel):
     result_preview: str = ""
     output_file: str = "" # No use
 
-class Notification(BaseModel):
-    type: str
-    task_id: str
-    status: str
-    command: str
-    preview: str
-    output_file: str # No use
+
+def format_background_task_notification(tasks: List[RuntimeTaskRecord]) -> str:
+    """Render background task results in the existing agent prompt format."""
+    if not tasks:
+        return ""
+    notifications: str = "<task_notifications>\n"
+    for task in tasks:
+        notifications += (
+            f"  <task_notification>\n"
+            f"      <task_id>{task.id}</task_id>\n"
+            f"      <status>{task.status}</status>\n"
+            f"      <command>{task.command}</command>\n"
+            f"      <summary>{task.result_preview}</summary>\n"
+            f"  </task_notification>\n"
+        )
+    notifications += "</task_notifications>\n"
+    return notifications
+
 
 class BackgroundManager:
     def __init__(self):
         
         # self.dir: Path = dir
         self.runtime_tasks: Dict[str, RuntimeTaskRecord] = {}
-        # self.notification_queue: List[Notification] = []
         self._lock: Dict[str, Lock] = {}
         self._manager_lock: RLock = RLock()
         # 目前传入的change_callback的唯一行为是更新当前主agent的checkpoint
@@ -159,6 +169,7 @@ class BackgroundManager:
                 completed_task: RuntimeTaskRecord = current_task.model_copy(deep=True)
                 logger.debug(f"Background task {background_task_id} completed.")
             checkpoint_handled: bool = False
+            # 在此处投递消息到Notification
             if self._completion_callback is not None:
                 checkpoint_handled = self._completion_callback(completed_task)
             if not checkpoint_handled:
@@ -192,7 +203,7 @@ class BackgroundManager:
         if self._change_callback is not None:
             self._change_callback()
 
-    def _collect_background_task_result(self, agent_id: str) -> List[RuntimeTaskRecord]:
+    def pop_completed_tasks(self, agent_id: str) -> List[RuntimeTaskRecord]:
         """Collect the result of a background task if it's completed."""
         completed_tasks: List[RuntimeTaskRecord] = []
         with self._manager_lock:
@@ -208,24 +219,25 @@ class BackgroundManager:
                 
         return completed_tasks
 
+    def remove_task(self, task_id: str) -> Optional[RuntimeTaskRecord]:
+        """Remove a task after its result has moved to a durable notification."""
+        with self._manager_lock:
+            task_record: Optional[RuntimeTaskRecord] = self.runtime_tasks.get(task_id)
+            if task_record is None:
+                return None
+            with self._lock.get(task_id, Lock()):
+                removed: RuntimeTaskRecord = task_record.model_copy(deep=True)
+                self.runtime_tasks.pop(task_id, None)
+                self._lock.pop(task_id, None)
+                return removed
+
     def get_background_task_notification(self, agent_id: str) -> str:
         """Get a notification string for any completed background tasks."""
-        completed_tasks: List[RuntimeTaskRecord] = self._collect_background_task_result(agent_id)
+        completed_tasks: List[RuntimeTaskRecord] = self.pop_completed_tasks(agent_id)
         logger.info(f"Collected {len(completed_tasks)} completed background tasks for agent {agent_id}.")
         if not completed_tasks:
             return ""
-        notifications: str = "<task_notifications>\n"
-        for task in completed_tasks:
-            notifications += (
-                f"  <task_notification>\n"
-                f"      <task_id>{task.id}</task_id>\n"
-                f"      <status>{task.status}</status>\n"
-                f"      <command>{task.command}</command>\n"
-                f"      <summary>{task.result_preview}</summary>\n"
-                f"  </task_notification>\n"
-            )
-        notifications += "</task_notifications>\n"
-        return notifications
+        return format_background_task_notification(completed_tasks)
 
 
     # def _record_path(self, task_id: str) -> Path:

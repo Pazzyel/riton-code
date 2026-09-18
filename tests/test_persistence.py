@@ -22,6 +22,10 @@ from persistence import (  # noqa: E402
     set_persistence_store,
 )
 from checkpoint import subagent_id_for  # noqa: E402
+from compact import CompactState  # noqa: E402
+from notification import Notification  # noqa: E402
+from background import RuntimeTaskRecord  # noqa: E402
+from checkpoint import build_main_checkpoint  # noqa: E402
 
 
 def checkpoint_payload(messages: list[dict[str, Any]]) -> Dict[str, Any]:
@@ -90,6 +94,35 @@ class PersistenceStoreTests(unittest.TestCase):
         self.assertIsNotNone(record)
         assert record is not None
         self.assertEqual(second_payload, record.payload)
+
+    def test_visible_message_batch_and_checkpoint_are_saved_together(self) -> None:
+        payload: Dict[str, Any] = checkpoint_payload(
+            [
+                {"role": "user", "content": "notification one"},
+                {"role": "user", "content": "notification two"},
+            ]
+        )
+
+        self.store.save_visible_messages_and_checkpoint(
+            self.session_id,
+            [
+                ("user", "notification one"),
+                ("user", "notification two"),
+            ],
+            self.session_id,
+            "main",
+            payload,
+        )
+
+        visible = self.store.list_messages(self.session_id)
+        self.assertEqual(
+            ["notification one", "notification two"],
+            [message.content for message in visible],
+        )
+        record = self.store.load_checkpoint(self.session_id, self.session_id)
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(payload, record.payload)
 
     def test_parent_checkpoint_update_and_child_deletion_are_committed_together(
         self,
@@ -332,6 +365,30 @@ class PersistenceStoreTests(unittest.TestCase):
 
 
 class CheckpointHelpersTests(unittest.TestCase):
+    def test_main_checkpoint_serializes_pending_notifications(self) -> None:
+        payload: Dict[str, Any] = build_main_checkpoint(
+            [],
+            0,
+            None,
+            CompactState(),
+            [
+                RuntimeTaskRecord(
+                    id="bg_task_1",
+                    agent_id="session_test",
+                    tool_name="read_file",
+                    tool_input={},
+                    command="",
+                )
+            ],
+            False,
+            [Notification(id="notification_1", content="ready")],
+        )
+
+        self.assertEqual(
+            [{"id": "notification_1", "content": "ready"}],
+            payload["pending_notifications"],
+        )
+
     def test_only_unresolved_tool_calls_are_replayed_in_order(self) -> None:
         messages: list[dict[str, Any]] = [
             {

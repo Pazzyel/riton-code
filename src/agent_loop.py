@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional, Any
+from typing import Callable, List, Dict, Optional, Any
 import logging
 import asyncio
 
@@ -14,9 +14,8 @@ from ai_config import client
 from prompt.system_prompt import system_prompt_builder
 from compact import CompactState, try_compact
 from recovery import choose_recovery, RecoveryType, CONTINUE_MESSAGE, backoff_delay
-from background import BACKGROUND_MANAGER
-from cron import CRON_TRIGGER_INTERVAL, CronJob, cron_lock, cron_queue
 from checkpoint import pending_tool_calls
+from notification import Notification, NotificationQueue
 from tool_execution import (
     CheckpointCallback,
     ToolCompletionCallback,
@@ -209,14 +208,6 @@ async def run_one_loop(
                 "content": remainder,
             })
 
-    # Background task notifications should be in the back of tool message
-    background_notifications: str = BACKGROUND_MANAGER.get_background_task_notification(agent_id)
-    if background_notifications is not None and background_notifications.strip() != "":
-        state.messages.append({
-            "role": "user",
-            "content": background_notifications,
-        })
-
     state.turn_count += 1
     state.transition_reason = "tool_call"
     logger.debug("Turn %d finished with transition_reason=%s", state.turn_count, state.transition_reason)
@@ -242,14 +233,6 @@ async def recover_pending_tool_calls(
             checkpoint_callback,
             completion_callback,
         )
-    background_notifications: str = BACKGROUND_MANAGER.get_background_task_notification(agent_id)
-    if background_notifications.strip():
-        state.messages.append(
-            {
-                "role": "user",
-                "content": background_notifications,
-            }
-        )
     state.turn_count += 1
     state.transition_reason = "tool_call"
     if checkpoint_callback is not None:
@@ -260,52 +243,53 @@ async def recover_pending_tool_calls(
 
 
 
-# 把CRON任务Agent执行的部分移动到这里，防止循环依赖
-
-# 为防死锁，固定先加agent_lock，再加cron_lock
-agent_lock: asyncio.Lock = asyncio.Lock()  # User input and cron job may race
+# User input and notification processing may race.
+agent_lock: asyncio.Lock = asyncio.Lock()
 
 
-async def queue_processor_loop(
+async def notification_processor_loop(
     state: LoopState,
     compact_state: CompactState,
     agent_id: str,
+    notification_queue: NotificationQueue,
+    notification_batch_callback: Callable[[List[Notification]], None],
+    notification_answer_callback: Callable[[str], None],
     checkpoint_callback: Optional[CheckpointCallback] = None,
-    completion_callback: Optional[ToolCompletionCallback] = None,
+    tool_completion_callback: Optional[ToolCompletionCallback] = None,
 ) -> None:
     while True:
-        await asyncio.sleep(CRON_TRIGGER_INTERVAL)
-        if not await has_cron_queue():
-            continue
+        notifications: List[Notification] = await notification_queue.wait_and_drain()
         async with agent_lock:
-            if not await has_cron_queue():
-                continue
-            logger.info(f"[cron] Processing {len(cron_queue)} queued jobs")
-            triggered_jobs: List[CronJob] = await consume_cron_queue()
-            for job in triggered_jobs:
-                logger.info(f"[cron] Injecting job {job.id} into agent loop")
+            notifications.extend(notification_queue.drain_ready())
+            logger.info("Processing %d queued notifications", len(notifications))
+            for notification in notifications:
                 state.messages.append({
                     "role": "user",
-                    "content": f"[cron job {job.id}] {job.prompt}",
+                    "content": notification.content,
                 })
-            if checkpoint_callback is not None:
-                checkpoint_callback()
+            notification_queue.acknowledge(
+                notification.id for notification in notifications
+            )
+            notification_batch_callback(notifications)
             await agent_loop(
                 state,
                 compact_state,
                 agent_id,
                 checkpoint_callback,
-                completion_callback,
+                tool_completion_callback,
             )
+            answer: Optional[str] = final_answer(state.messages)
+            if answer is None:
+                logger.warning("Notification agent loop ended without a final answer")
+                continue
+            notification_answer_callback(answer)
 
-async def has_cron_queue() -> bool:
-    """Check if there are any jobs in the cron_queue."""
-    async with cron_lock:
-        return len(cron_queue) > 0
 
-async def consume_cron_queue() -> List[CronJob]:
-    """Consume and return all jobs in the cron_queue."""
-    async with cron_lock:
-        jobs: List[CronJob] = list(cron_queue)
-        cron_queue.clear()
-        return jobs
+def final_answer(messages: List[Dict[str, Any]]) -> Optional[str]:
+    if not messages:
+        return None
+    last_message: Dict[str, Any] = messages[-1]
+    if last_message.get("role") != "assistant" or last_message.get("tool_calls"):
+        return None
+    content: Any = last_message.get("content")
+    return str(content) if content is not None else ""
