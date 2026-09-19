@@ -47,6 +47,9 @@
 │   ├── tools.py              # 工具函数实现
 │   ├── background.py         # 后台任务管理
 │   ├── notification.py       # 可恢复的统一通知队列
+│   ├── session.py            # 主会话生命周期与运行编排
+│   ├── session_state.py      # 会话与代理循环状态
+│   ├── session_persistence.py # 会话检查点与可见消息事务
 │   ├── subagent.py           # 子代理系统
 │   ├── skill.py              # 技能注册和管理系统
 │   ├── todo.py               # 待办事项管理

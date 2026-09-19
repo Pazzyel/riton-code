@@ -16,6 +16,7 @@ from compact import CompactState, try_compact
 from recovery import choose_recovery, RecoveryType, CONTINUE_MESSAGE, backoff_delay
 from checkpoint import pending_tool_calls
 from notification import Notification, NotificationQueue
+from session_state import LoopState
 from tool_execution import (
     CheckpointCallback,
     ToolCompletionCallback,
@@ -34,16 +35,6 @@ PARENT_TOOL_HANDLERS["subagent"] = lambda **kw: run_subagent_tool(
     tool_call_id=kw["tool_call_id"],
 )
 PARENT_TOOLS = TOOLS + SUBAGENT_TOOLS
-
-class LoopState:
-    messages:           List[Dict[str, Any]]    # The list of messages in the conversation history
-    turn_count:         int                     # The number of turns taken in the loop
-    transition_reason:  Optional[str]           # The reason for transitioning to the next turn, if applicable
-
-    def __init__(self, messages: List[Dict[str, Any]], turn_count: int, transition_reason: Optional[str]):
-        self.messages = messages
-        self.turn_count = turn_count
-        self.transition_reason = transition_reason
 
 async def agent_loop(
     state: LoopState,
