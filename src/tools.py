@@ -8,6 +8,7 @@ import os
 import logging
 import shlex
 import inspect
+from copy import deepcopy
 
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 
@@ -281,7 +282,7 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "list_crons",
+            "name": "list_cron",
             "description": "List all registered cron jobs.",
             "parameters": {
                 "type": "object", 
@@ -323,11 +324,13 @@ SUBAGENT_TOOLS = [
 ]
 
 # Add run_in_background property to all tools
-for tool in TOOLS:
-    tool["function"]["parameters"]["properties"]["run_in_background"] = {"type": "boolean", "description": "Optional flag to indicate if the tool should run in the background. Default is False."}
-
-for tool in SUBAGENT_TOOLS:
-    tool["function"]["parameters"]["properties"]["run_in_background"] = {"type": "boolean", "description": "Optional flag to indicate if the tool should run in the background. Default is False."}
+def warp_tool_schema_with_run_in_background(tool_schemas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    warped_tools: List[Dict[str, Any]] = []
+    for tool_schema in tool_schemas:
+        warped_tool: Dict[str, Any] = deepcopy(tool_schema)
+        warped_tool["function"]["parameters"]["properties"]["run_in_background"] = {"type": "boolean", "description": "Optional flag to indicate if the tool should run in the background. Default is False."}
+        warped_tools.append(warped_tool)
+    return warped_tools
 
 async def run_tool(tool_call: ChatCompletionMessageToolCall, tool_handlers: Dict[str, Callable], agent_id: str) -> str:
     """Run a tool call using the provided handlers and return the output."""

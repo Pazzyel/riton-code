@@ -7,7 +7,7 @@ from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 
 import config as config
-from tools import TOOLS, TOOL_HANDLERS, SUBAGENT_TOOLS
+from tools import TOOLS, TOOL_HANDLERS, SUBAGENT_TOOLS, warp_tool_schema_with_run_in_background
 from subagent import run_subagent_tool
 from todo import todo_manager
 from ai_config import client
@@ -34,7 +34,7 @@ PARENT_TOOL_HANDLERS["subagent"] = lambda **kw: run_subagent_tool(
     agent_id=kw["agent_id"],
     tool_call_id=kw["tool_call_id"],
 )
-PARENT_TOOLS = TOOLS + SUBAGENT_TOOLS
+PARENT_TOOLS = warp_tool_schema_with_run_in_background(TOOLS + SUBAGENT_TOOLS)
 
 async def agent_loop(
     state: LoopState,

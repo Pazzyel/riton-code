@@ -2,6 +2,7 @@ from typing import Any, Callable, Dict, List, Optional
 import asyncio
 import logging
 
+from PyQt5.QtCore.QProcess import finished
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
@@ -89,6 +90,7 @@ async def run_subagent_tool(
     handlers: Dict[str, Callable] = TOOL_HANDLERS,
     max_turns: int = SUBAGENT_DEFAULT_MAX_TURNS,
 ) -> str:
+    global stop_reason
     store: PersistenceStore = get_persistence_store()
     session_id: str = agent_id
     subagent_id: str = subagent_id_for(session_id, tool_call_id)
@@ -258,14 +260,10 @@ async def run_subagent_tool(
                 save_checkpoint,
             )
 
-        background_notifications = BACKGROUND_MANAGER.get_background_task_notification(
-            subagent_id
-        )
-        if background_notifications.strip():
-            subagent.messages.append(
-                {"role": "user", "content": background_notifications}
-            )
-        save_checkpoint()
+        # subagent don't run background task
+        # key: if stop reason == "stop" means agent finished all tasks, or tool_call means need tool call
+        if stop_reason == "stop":
+            break
 
     agent_compact_states.pop(subagent_id, None)
     return _summary(subagent.messages)
