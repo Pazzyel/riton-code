@@ -3,15 +3,19 @@ from typing_extensions import Literal
 from pydantic import BaseModel
 from fnmatch import fnmatch
 import json
+import logging
+
+import config
+
+logger = logging.getLogger(__name__)
 
 from permission.bash_security import bash_security_validator
 
-PermissionMode: TypeAlias = Literal["default", "plan", "auto"]
+PermissionMode: TypeAlias = Literal["default", "plan", "auto", "allow"]
 PermissionBehavior: TypeAlias = Literal["allow", "deny", "ask"]
 
 MAX_CONSTITUTIVE_DENIAL: int = 3
 
-READ_ONLY_TOOLS: List[str] = ["read_file"]
 WRITE_TOOLS: List[str] = ["write_file", "edit_file"]
 
 class PermissionRule(BaseModel):
@@ -51,6 +55,9 @@ class PermissionManager:
 
     def check(self, tool_name: str, tool_args: dict) -> PermissionResult:
         """Check the permission for a given tool call based on the defined rules and mode."""
+        if self.mode == "allow":
+            logger.warning(f"You are using 'allow' mode for this tool call. Approved tool call of '{tool_name}' with args '{tool_args}'")
+            return PermissionResult(behavior="allow", reason="Using global allow mode.")
         # 1. Special handling for bash commands with security validation
         if tool_name == "bash":
             bash_command: str = tool_args.get("command", "")
@@ -59,7 +66,7 @@ class PermissionManager:
                 server_failure = [f for f in failures if f[0] in bash_security_validator.SERVER_COMMANDS]
                 if server_failure:
                     return PermissionResult(behavior="deny", reason=bash_security_validator.describe_failures(bash_command))
-                else:
+                elif self.mode != "auto":
                     return PermissionResult(behavior="ask", reason=bash_security_validator.describe_failures(bash_command))
 
         # 2. Handle deny rules first
@@ -80,9 +87,13 @@ class PermissionManager:
             else:
                 return PermissionResult(behavior="allow", reason=f"All read-only tools included '{tool_name}' are allowed in 'plan' mode.")
         if self.mode == "auto":
-            if tool_name in READ_ONLY_TOOLS:
-                return PermissionResult(behavior="allow", reason=f"All read-only tools included '{tool_name}' are auto approved in 'auto' mode.")
-            # else for ask
+            return PermissionResult(
+                behavior="allow",
+                reason=(
+                    f"Tool '{tool_name}' is auto approved in 'auto' mode; "
+                    "bash commands are isolated by the configured sandbox."
+                ),
+            )
 
         # 4. Check allow rules
         for rule in self.rules:
@@ -137,5 +148,18 @@ class PermissionManager:
         if self.constitutive_denials >= self.max_constitutive_denials:
             print(f"Constitutive denial threshold reached, recommended to switch to 'plan' mode for better performance, or reclarify the target.")
         return False
+
+    def ask_unsandboxed_bash(self, command: str, sandbox_error: str) -> bool:
+        """Ask whether a sandbox-blocked command may be retried on the host."""
+        error_preview = sandbox_error.strip()[:500]
+        print("\n  [Sandbox] The command was blocked by sandbox permissions.")
+        print(f"  Command: {command[:500]}")
+        if error_preview:
+            print(f"  Error: {error_preview}")
+        try:
+            user_input = input("Retry without sandbox? (y/N): ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return False
+        return user_input in {"y", "yes"}
     
-permission_manager = PermissionManager()
+permission_manager = PermissionManager(mode=config.PERMISSION_MODE)

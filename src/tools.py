@@ -4,14 +4,15 @@ import aiofiles
 import asyncio
 from asyncio.subprocess import Process
 import json
-import os
 import logging
 import shlex
+import shutil
 import inspect
 from copy import deepcopy
 
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 
+import config
 from todo import todo_manager
 from skill import load_skill, get_skill_dir
 from directory import WORKDIR
@@ -400,15 +401,45 @@ async def run_bash(command: str) -> str:
     if "cat" in command:
         return "Error: 'cat' command is not allowed. Use the read_file tool instead to read file contents."
     try:
-        result: Process = await asyncio.create_subprocess_shell(
-            command, 
-            shell=True, 
-            cwd=os.getcwd(), 
-            stdout=asyncio.subprocess.PIPE, 
-            stderr=asyncio.subprocess.PIPE
-        )
+        if config.PERMISSION_MODE == "auto":
+            bwrap_command = build_bwrap_command(command)
+            result: Process = await asyncio.create_subprocess_exec(
+                *bwrap_command,
+                cwd=WORKDIR,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        else:
+            result = await asyncio.create_subprocess_shell(
+                command,
+                shell=True,
+                cwd=WORKDIR,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
         stdout, stderr = await asyncio.wait_for(result.communicate(), timeout=30)  # Set a timeout for command execution
+        if (
+            config.PERMISSION_MODE == "auto"
+            and is_sandbox_permission_error(result.returncode, stderr)
+            and await asyncio.to_thread(
+                permission_manager.ask_unsandboxed_bash,
+                command,
+                stderr.decode(errors="replace"),
+            )
+        ):
+            # 沙箱执行失败时询问在外部环境执行
+            logger.warning("User approved unsandboxed retry for bash command: %s", command)
+            result = await asyncio.create_subprocess_shell(
+                command,
+                shell=True,
+                cwd=WORKDIR,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(result.communicate(), timeout=30)
     except asyncio.TimeoutError as e:
+        result.kill()
+        await result.wait()
         logger.error(f"Error while running bash command '{command}': {str(e)}")
         return f"Error: Command timed out: {str(e)}"
     except (FileNotFoundError, OSError) as e:
@@ -416,9 +447,59 @@ async def run_bash(command: str) -> str:
         return f"Error: {e}"
     
     
-    output: str = (stdout.decode() + stderr.decode()).strip()
+    output: str = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
     # Limit output to 50,000 characters to prevent overwhelming the agent
     return output[:50000] if output else "Command executed successfully with no output."
+
+
+def is_sandbox_permission_error(returncode: Optional[int], stderr: bytes) -> bool:
+    """Return whether a failed command appears to have hit a sandbox boundary."""
+    if returncode in (None, 0):
+        return False
+    error = stderr.decode(errors="replace").lower()
+    permission_markers = (
+        "read-only file system",
+        "permission denied",
+        "operation not permitted",
+        "只读文件系统",
+        "权限不够",
+        "不允许的操作",
+    )
+    return any(marker in error for marker in permission_markers)
+
+
+def build_bwrap_command(command: str) -> List[str]:
+    """Build a Bubblewrap command for the configured auto-mode sandbox."""
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        raise FileNotFoundError(
+            "Bubblewrap executable 'bwrap' was not found; refusing to run an "
+            "unsandboxed command in auto mode."
+        )
+
+    workspace = str(WORKDIR.resolve())
+    setting = config.SANDBOX_SETTING
+    root_bind = "--bind" if setting == "all" else "--ro-bind"
+    args: List[str] = [
+        bwrap,
+        "--die-with-parent",
+        "--new-session",
+        root_bind,
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+    ]
+    if setting == "workspace":
+        args.extend(["--bind", workspace, workspace])
+    if not config.SANDBOX_NETWORK_ACCESS:
+        args.append("--unshare-net")
+    args.extend(["--chdir", workspace, "--", "/bin/bash", "-lc", command])
+    return args
 
 
 def safe_path(p: str, agent_id: str) -> Path:

@@ -33,7 +33,7 @@
 - **灵活的运行模式**：
   - `default`：标准模式，根据规则和用户确认决定权限
   - `plan`：规划模式，只允许读取操作，禁止所有写入工具
-  - `auto`：自动模式，自动批准所有只读工具调用
+  - `auto`：自动批准工具调用；Bash 命令通过 Bubblewrap 沙箱执行
 - **智能拒绝机制**：连续拒绝达到阈值时自动建议切换到更合适的模式
 - **用户友好的交互**：支持一次性确认(y)、永久允许(always)或拒绝(n)
 
@@ -86,7 +86,17 @@ model:
   name: gpt-5.4
   base_url: https://api.openai.com/v1
   api_key_path_var: OPENAI_API_KEY
+
+permission:
+  mode: auto
+  sandbox:
+    # read=全部只读；workspace=仅当前工作目录可写；all=全部可写
+    setting: workspace
+    # false 时 Bubblewrap 会创建独立网络命名空间
+    network-access: true
 ```
+
+`auto` 模式仅支持 Linux，并要求系统已安装 `bwrap`（Bubblewrap）。沙箱的工作目录固定为程序启动时的当前目录。若 `bwrap` 不存在，命令会失败，不会自动降级为无沙箱执行。当命令因只读文件系统或权限限制失败时，程序会询问用户是否允许在非沙箱模式下重试；只有明确输入 `y` 或 `yes` 才会执行。
 
 ## 🎯 使用示例
 
