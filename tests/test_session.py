@@ -15,9 +15,9 @@ from compact import CompactState, agent_compact_states  # noqa: E402
 from hook import HookResponse  # noqa: E402
 from notification import NOTIFICATION_QUEUE, Notification, NotificationQueue  # noqa: E402
 from persistence import CHECKPOINT_VERSION, PersistenceStore  # noqa: E402
-from session import MainSession  # noqa: E402
-from session_persistence import SessionPersistenceCoordinator  # noqa: E402
-from session_state import LoopState, SessionContext  # noqa: E402
+from session.session import MainSession  # noqa: E402
+from session.session_persistence import SessionPersistenceCoordinator  # noqa: E402
+from session.session_state import LoopState, SessionContext  # noqa: E402
 
 
 class SessionPersistenceCoordinatorTests(unittest.TestCase):

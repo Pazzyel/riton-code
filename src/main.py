@@ -55,7 +55,7 @@ async def run_session(
 ) -> None:
     """Lazily construct and run a main-agent session."""
     # Keep runtime imports below the list-sessions path so `-l` stays lightweight.
-    from session import MainSession
+    from session.session import MainSession
 
     session: MainSession = await MainSession.create(store, session_id, resumed)
     await session.run()

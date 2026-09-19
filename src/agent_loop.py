@@ -16,7 +16,7 @@ from compact import CompactState, try_compact
 from recovery import choose_recovery, RecoveryType, CONTINUE_MESSAGE, backoff_delay
 from checkpoint import pending_tool_calls
 from notification import Notification, NotificationQueue
-from session_state import LoopState
+from session.session_state import LoopState
 from tool_execution import (
     CheckpointCallback,
     ToolCompletionCallback,
