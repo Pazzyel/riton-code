@@ -144,7 +144,7 @@ class MainSession:
         """
         Run recovery, interactive input, scheduled work, and orderly cleanup.
 
-        在应用启动时恢复checkpoint，并拉起cron检查任务和notification消费任务
+        在应用启动时恢复checkpoint，并拉起输入接受任务，cron检查任务和notification消费任务
         """
         self._event_loop = asyncio.get_running_loop()
         BACKGROUND_MANAGER.set_callbacks(
